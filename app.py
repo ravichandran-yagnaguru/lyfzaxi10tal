@@ -36,7 +36,8 @@ def run_pipeline(dry_run: bool) -> dict:
     recent = state.get_recent_history()
     recent_openings = [h["opening_line"] for h in recent if h.get("opening_line")]
 
-    topic = topics.pick_next_topic(recent)
+    tried_topic_ids: set = set()
+    topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)
     failure_reasons: list[str] = []
 
     for attempt in range(1, config.MAX_GENERATION_ATTEMPTS + 1):
@@ -55,7 +56,8 @@ def run_pipeline(dry_run: bool) -> dict:
             failure_reasons = [f"image sourcing failed: {e}"]
             logger.info("Image sourcing failed: %s", e)
             if topic["image_type"] == "photo":
-                topic = topics.pick_next_topic(recent)
+                tried_topic_ids.add(topic["id"])
+                topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)
             continue
 
         opening_line = _opening_line(draft)

@@ -17,6 +17,7 @@ import cairosvg
 import requests
 
 import config
+from llm_utils import extract_text
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
@@ -44,11 +45,12 @@ class ImageSourcingError(Exception):
 def _generate_diagram_svg(topic: dict) -> str:
     resp = _client.messages.create(
         model=config.GENERATION_MODEL,
-        max_tokens=1500,
+        max_tokens=3000,
+        thinking={"type": "disabled"},
         system=_DIAGRAM_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Diagram concept: {topic['prompt']}"}],
     )
-    svg = resp.content[0].text.strip()
+    svg = extract_text(resp)
     if svg.startswith("```"):
         svg = svg.strip("`")
         if svg.lower().startswith("svg"):

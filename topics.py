@@ -49,11 +49,15 @@ TOPICS = [
 _BY_ID = {t["id"]: t for t in TOPICS}
 
 
-def pick_next_topic(recent_history: list[dict]) -> dict:
-    """Pick a topic avoiding: the most recent category, and any topic id used
+def pick_next_topic(recent_history: list[dict], exclude_ids: set = frozenset()) -> dict:
+    """Pick a topic avoiding: the most recent category, any topic id used
     within the current cycle (resets once every topic in that category has
-    been used once). `recent_history` is a list of {"topic_id": str,
-    "category": str} ordered most-recent-first.
+    been used once), and any id in `exclude_ids` (topics already tried and
+    rejected earlier in the SAME run — since this function is otherwise a
+    pure function of `recent_history`, calling it again with unchanged
+    history would just deterministically return the same topic again).
+    `recent_history` is a list of {"topic_id": str, "category": str} ordered
+    most-recent-first.
 
     Rotation happens at the CATEGORY level first (so all five categories
     cycle through, not just whichever two happen to tie-break first), then
@@ -69,14 +73,23 @@ def pick_next_topic(recent_history: list[dict]) -> dict:
                 return i
         return len(recent_history) + 1  # never used recently — most eligible
 
-    eligible_categories = [c for c in all_categories if c not in recent_categories_immediate]
+    def available_in(cat):
+        return [t for t in TOPICS if t["category"] == cat and t["id"] not in exclude_ids]
+
+    eligible_categories = [
+        c for c in all_categories if c not in recent_categories_immediate and available_in(c)
+    ]
     if not eligible_categories:
+        eligible_categories = [c for c in all_categories if available_in(c)]
+    if not eligible_categories:
+        # every single topic has been excluded this run — give up on exclusion
         eligible_categories = all_categories
+        exclude_ids = frozenset()
 
     eligible_categories.sort(key=category_last_used_index, reverse=True)
     chosen_category = eligible_categories[0]
 
-    category_topics = [t for t in TOPICS if t["category"] == chosen_category]
+    category_topics = [t for t in TOPICS if t["category"] == chosen_category and t["id"] not in exclude_ids]
     candidates = [t for t in category_topics if t["id"] not in used_ids]
     if not candidates:
         candidates = category_topics  # every topic in this category has cycled — start over

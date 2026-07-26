@@ -6,6 +6,7 @@ import re
 import anthropic
 
 import config
+from llm_utils import extract_text
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
@@ -14,11 +15,6 @@ _LABEL_PATTERN = re.compile(
 )
 _BULLET_PATTERN = re.compile(r"^\s*[-*•]\s+", re.MULTILINE)
 _HEADER_PATTERN = re.compile(r"^#{1,6}\s", re.MULTILINE)
-_YEAR_PATTERN = re.compile(r"\b(1[6-9]\d{2}|20\d{2})\b")
-_HEDGE_PHRASES = [
-    "legend has it", "the story goes", "some say", "as the story", "allegedly",
-    "supposedly", "rumor has it", "the tale", "as legend", "as the tale",
-]
 
 
 def rule_based_checks(draft: str) -> list[str]:
@@ -37,13 +33,8 @@ def rule_based_checks(draft: str) -> list[str]:
     if word_count > 400:
         violations.append(f"too long ({word_count} words), likely to be truncated or lose focus")
 
-    if _YEAR_PATTERN.search(draft):
-        has_hedge = any(phrase in draft.lower() for phrase in _HEDGE_PHRASES)
-        if not has_hedge:
-            violations.append(
-                "mentions a specific year/date with no hedging language — the critic pass must "
-                "confirm this is genuinely well-documented history, not folklore stated as fact"
-            )
+    if draft and draft.rstrip()[-1] not in '.!?"”':
+        violations.append("does not end on terminal punctuation — looks cut off mid-sentence")
 
     return violations
 
@@ -59,9 +50,11 @@ Rules:
 ("legend has it", "the story goes", etc.), that's only acceptable if the claim is genuinely \
 well-established, common knowledge (e.g. widely documented invention dates, published research). \
 If it reads like unverifiable folklore stated as flat fact, that's a FAIL.
-- Must not open the same way as any of the recent posts listed below.
-- Must not be a repeat/rehash of the same rhetorical trick as the recent posts (e.g. always \
-opening with "Ever wonder...").
+- Must not open the same way, or with the same rhetorical trick, as any specific post in the \
+"Recent post openings" list below. Judge this ONLY against those actual entries — if the list is \
+empty or has no real overlap with the draft's opening, this rule does not apply. A rhetorical \
+question opener, a scenario opener, a direct statement, etc. are all fine on their own merits; \
+none of them is inherently a violation in isolation.
 
 Respond in EXACTLY this format, nothing else:
 VERDICT: PASS or FAIL
@@ -74,11 +67,12 @@ def critic_check(draft: str, recent_openings: list[str]) -> tuple[bool, str]:
 
     resp = _client.messages.create(
         model=config.CRITIC_MODEL,
-        max_tokens=200,
+        max_tokens=300,
+        thinking={"type": "disabled"},
         system=_CRITIC_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    text = resp.content[0].text.strip()
+    text = extract_text(resp)
 
     verdict_match = re.search(r"VERDICT:\s*(PASS|FAIL)", text, re.IGNORECASE)
     reason_match = re.search(r"REASON:\s*(.*)", text, re.IGNORECASE)

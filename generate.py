@@ -3,6 +3,7 @@ user-approved example voice."""
 import anthropic
 
 import config
+from llm_utils import extract_text
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
@@ -85,8 +86,9 @@ def generate_draft(topic: dict, recent_openings: list[str]) -> str:
 
     resp = _client.messages.create(
         model=config.GENERATION_MODEL,
-        max_tokens=600,
+        max_tokens=1500,
+        thinking={"type": "disabled"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    return resp.content[0].text.strip()
+    return extract_text(resp)
