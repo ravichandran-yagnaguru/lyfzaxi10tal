@@ -1,6 +1,8 @@
-"""Posting to X. Reuses the OAuth1 + v1.1 media-upload pattern from the old
-repo (that part was sound) — tweepy.API is still required for media uploads,
-long-form text posting works the same way once the account has Premium.
+"""Posting to X. Media upload still requires the v1.1 tweepy.API (media_upload
+has no v2 equivalent), but tweet creation itself must go through the v2
+tweepy.Client — X retired the v1.1 statuses/update endpoint (confirmed via a
+live 404 from api.update_status during testing). Both use the same OAuth1
+user-context credentials.
 """
 import tweepy
 
@@ -17,9 +19,17 @@ def _get_api() -> tweepy.API:
     return tweepy.API(auth)
 
 
+def _get_client() -> tweepy.Client:
+    return tweepy.Client(
+        consumer_key=config.TWITTER_API_KEY,
+        consumer_secret=config.TWITTER_API_SECRET,
+        access_token=config.TWITTER_ACCESS_TOKEN,
+        access_token_secret=config.TWITTER_ACCESS_TOKEN_SECRET,
+    )
+
+
 def post(text: str, image_path: str) -> str:
     """Posts the given text with one attached image. Returns the tweet id."""
-    api = _get_api()
-    media = api.media_upload(image_path)
-    status = api.update_status(status=text, media_ids=[media.media_id])
-    return str(status.id)
+    media = _get_api().media_upload(image_path)
+    response = _get_client().create_tweet(text=text, media_ids=[media.media_id])
+    return str(response.data["id"])

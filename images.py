@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -91,13 +92,17 @@ def _make_diagram(topic: dict) -> SourcedImage:
 def _unsplash_search(keywords: str, subject: str) -> SourcedImage | None:
     if not config.UNSPLASH_ACCESS_KEY:
         return None
-    resp = requests.get(
-        "https://api.unsplash.com/search/photos",
-        headers={"Authorization": f"Client-ID {config.UNSPLASH_ACCESS_KEY}"},
-        params={"query": keywords, "per_page": 10, "content_filter": "high"},
-        timeout=15,
-    )
-    resp.raise_for_status()
+    try:
+        resp = requests.get(
+            "https://api.unsplash.com/search/photos",
+            headers={"Authorization": f"Client-ID {config.UNSPLASH_ACCESS_KEY}"},
+            params={"query": keywords, "per_page": 10, "content_filter": "high"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logging.warning("Unsplash search failed, falling back: %s", e)
+        return None
     results = resp.json().get("results", [])
 
     for photo in results:
@@ -128,13 +133,17 @@ def _unsplash_search(keywords: str, subject: str) -> SourcedImage | None:
 def _pexels_search(keywords: str, subject: str) -> SourcedImage | None:
     if not config.PEXELS_API_KEY:
         return None
-    resp = requests.get(
-        "https://api.pexels.com/v1/search",
-        headers={"Authorization": config.PEXELS_API_KEY},
-        params={"query": keywords, "per_page": 10},
-        timeout=15,
-    )
-    resp.raise_for_status()
+    try:
+        resp = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": config.PEXELS_API_KEY},
+            params={"query": keywords, "per_page": 10},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logging.warning("Pexels search failed: %s", e)
+        return None
     results = resp.json().get("photos", [])
 
     for photo in results:
