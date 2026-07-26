@@ -1,0 +1,7 @@
+# Desired posting schedule. Edit this, then have manage_schedule.py run to
+# sync live Cloud Scheduler jobs to match — no redeploy of the Cloud Run
+# service needed. Cloud Scheduler's free tier covers 3 jobs/month, so up to
+# 3 times below costs nothing; a 4th distinct time is a few cents/month.
+timezone: "America/Los_Angeles"
+times:
+  - "09:00"

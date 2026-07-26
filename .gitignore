@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+
+# Env / secrets — never commit real values
+.env
+.env.yaml
+*.env
+
+# Local state fallback (used only when Firestore isn't configured, e.g. local dry-run)
+local_state.json
+
+# Generated media (diagrams / downloaded photos) — never commit binary output
+/tmp_media/
+*.png
+*.jpg
+*.jpeg
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

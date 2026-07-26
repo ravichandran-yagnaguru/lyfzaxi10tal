@@ -1,0 +1,9 @@
+.git/
+.gitignore
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.yaml
+local_state.json
+tmp_media/
