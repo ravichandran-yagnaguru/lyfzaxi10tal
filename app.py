@@ -6,9 +6,12 @@ Logs a POST_SKIPPED error line when a day is skipped after exhausting
 retries — a Cloud Monitoring log-based alert (set up at deploy time) watches
 for that string and emails the user.
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request
 
@@ -32,9 +35,27 @@ def _opening_line(draft: str) -> str:
     return first_sentence[:120]
 
 
+def _minutes_since_last_post(recent: list) -> float | None:
+    last_posted = next((h for h in recent if h.get("status") == "posted" and h.get("date")), None)
+    if not last_posted:
+        return None
+    last_time = datetime.fromisoformat(last_posted["date"])
+    return (datetime.now(timezone.utc) - last_time) / timedelta(minutes=1)
+
+
 def run_pipeline(dry_run: bool) -> dict:
     recent = state.get_recent_history()
     recent_openings = [h["opening_line"] for h in recent if h.get("opening_line")]
+
+    if not dry_run:
+        minutes_since = _minutes_since_last_post(recent)
+        if minutes_since is not None and minutes_since < config.MIN_MINUTES_BETWEEN_POSTS:
+            logger.info(
+                "Skipping: last successful post was %.1f min ago (< %d min guard) -- likely a "
+                "duplicate trigger for the same slot.",
+                minutes_since, config.MIN_MINUTES_BETWEEN_POSTS,
+            )
+            return {"status": "skipped_duplicate_guard", "minutes_since_last_post": round(minutes_since, 1)}
 
     tried_topic_ids: set = set()
     topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)

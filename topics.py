@@ -2,6 +2,7 @@
 from state.py) so it can avoid repeating a category back-to-back and avoid
 reusing a topic until the bank cycles.
 """
+import random
 
 TOPICS = [
     # --- tech / systems ---
@@ -86,8 +87,12 @@ def pick_next_topic(recent_history: list[dict], exclude_ids: set = frozenset()) 
         eligible_categories = all_categories
         exclude_ids = frozenset()
 
-    eligible_categories.sort(key=category_last_used_index, reverse=True)
-    chosen_category = eligible_categories[0]
+    # Pick randomly among whichever categories are tied for "least recently
+    # used" — with an empty or symmetric history every category ties, and a
+    # stable sort would deterministically favor the same one (alphabetically
+    # first) every single time history is empty, e.g. every fresh deploy.
+    best_recency = max(category_last_used_index(c) for c in eligible_categories)
+    chosen_category = random.choice([c for c in eligible_categories if category_last_used_index(c) == best_recency])
 
     category_topics = [t for t in TOPICS if t["category"] == chosen_category and t["id"] not in exclude_ids]
     candidates = [t for t in category_topics if t["id"] not in used_ids]
@@ -100,8 +105,10 @@ def pick_next_topic(recent_history: list[dict], exclude_ids: set = frozenset()) 
                 return i
         return len(recent_history) + 1
 
-    candidates.sort(key=topic_last_used_index, reverse=True)
-    return candidates[0]
+    # Same tie-breaking fix at the topic level.
+    best_topic_recency = max(topic_last_used_index(t) for t in candidates)
+    tied = [t for t in candidates if topic_last_used_index(t) == best_topic_recency]
+    return random.choice(tied)
 
 
 def get_topic(topic_id: str) -> dict:

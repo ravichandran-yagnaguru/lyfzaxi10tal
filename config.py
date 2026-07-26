@@ -27,3 +27,10 @@ SCHEDULER_SERVICE_ACCOUNT_EMAIL = os.getenv("SCHEDULER_SERVICE_ACCOUNT_EMAIL")
 
 MAX_GENERATION_ATTEMPTS = 3
 RECENT_HISTORY_WINDOW = 7
+
+# Scheduled slots are hours apart, but two triggers can legitimately land
+# minutes apart (a manual trigger near a scheduled time, or a scheduler retry
+# racing a slow-but-still-running original request) -- skip posting if the
+# last successful post was more recent than this, rather than risk a
+# double-post from the same intended slot.
+MIN_MINUTES_BETWEEN_POSTS = 20
