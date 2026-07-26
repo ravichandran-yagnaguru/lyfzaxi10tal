@@ -88,7 +88,7 @@ def generate_draft(topic: dict, recent_openings: list[str]) -> str:
         model=config.GENERATION_MODEL,
         max_tokens=1500,
         thinking={"type": "disabled"},
-        system=SYSTEM_PROMPT,
+        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_prompt}],
     )
     return extract_text(resp)
