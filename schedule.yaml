@@ -1,7 +1,15 @@
-# Desired posting schedule. Edit this, then have manage_schedule.py run to
-# sync live Cloud Scheduler jobs to match — no redeploy of the Cloud Run
-# service needed. Cloud Scheduler's free tier covers 3 jobs/month, so up to
-# 3 times below costs nothing; a 4th distinct time is a few cents/month.
+# Weekly posting schedule -- a fixed set of times per day of week. Edit this,
+# then re-run manage_schedule.py to sync live Cloud Scheduler jobs to match
+# (no Cloud Run redeploy needed). Days with identical time lists share the
+# same Cloud Scheduler job (via cron's day-of-week list), so this whole
+# pattern costs only 6 jobs even though it covers all 7 days -- Cloud
+# Scheduler's free tier covers the first 3, so ~$0.30/month for the rest.
 timezone: "America/Los_Angeles"
-times:
-  - "09:00"
+weekly_schedule:
+  monday:    ["09:00", "15:00"]
+  tuesday:   ["11:00", "17:00"]
+  wednesday: ["11:00", "19:00"]
+  thursday:  ["09:00", "15:00"]   # same as monday
+  friday:    ["11:00", "17:00"]   # same as tuesday
+  saturday:  ["11:00", "19:00"]   # same as wednesday
+  sunday:    ["11:00", "17:00"]   # same as tuesday
