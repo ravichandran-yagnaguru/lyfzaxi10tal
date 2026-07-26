@@ -42,6 +42,23 @@ class ImageSourcingError(Exception):
     pass
 
 
+def _matches_subject(text: str, subject: str) -> bool:
+    """Search APIs are fuzzy/semantic — the top license-compliant result is
+    often thematically unrelated (e.g. a generic 'chopping vegetables' photo
+    for a search about onions specifically; generic words in the search query
+    like 'kitchen' match almost anything, so matching against the whole
+    keyword bag isn't reliable). Instead require the photo's own description
+    to actually mention the topic's specific subject noun, with basic
+    singular/plural handling since Unsplash/Pexels descriptions don't always
+    match the query's exact word form."""
+    if not text or not subject:
+        return False
+    text_lower = text.lower()
+    subject_lower = subject.lower()
+    variant = subject_lower[:-1] if subject_lower.endswith("s") else subject_lower + "s"
+    return subject_lower in text_lower or variant in text_lower
+
+
 def _generate_diagram_svg(topic: dict) -> str:
     resp = _client.messages.create(
         model=config.GENERATION_MODEL,
@@ -71,7 +88,7 @@ def _make_diagram(topic: dict) -> SourcedImage:
     return SourcedImage(path=out_path, source="generated-diagram", attribution="")
 
 
-def _unsplash_search(keywords: str) -> SourcedImage | None:
+def _unsplash_search(keywords: str, subject: str) -> SourcedImage | None:
     if not config.UNSPLASH_ACCESS_KEY:
         return None
     resp = requests.get(
@@ -91,6 +108,10 @@ def _unsplash_search(keywords: str) -> SourcedImage | None:
         if is_plus:
             continue
 
+        description = " ".join(filter(None, [photo.get("alt_description"), photo.get("description")]))
+        if not _matches_subject(description, subject):
+            continue
+
         os.makedirs(MEDIA_DIR, exist_ok=True)
         image_url = photo["urls"]["regular"]
         img_bytes = requests.get(image_url, timeout=15).content
@@ -104,7 +125,7 @@ def _unsplash_search(keywords: str) -> SourcedImage | None:
     return None
 
 
-def _pexels_search(keywords: str) -> SourcedImage | None:
+def _pexels_search(keywords: str, subject: str) -> SourcedImage | None:
     if not config.PEXELS_API_KEY:
         return None
     resp = requests.get(
@@ -118,8 +139,11 @@ def _pexels_search(keywords: str) -> SourcedImage | None:
 
     for photo in results:
         # All standard Pexels API results are under the Pexels License (free
-        # for use); there is no separate paid tier to filter out here, but we
-        # still confirm the photographer/source explicitly for the audit log.
+        # for use), no separate paid tier to filter out here — but still
+        # require the description to actually match the topic's subject.
+        if not _matches_subject(photo.get("alt", ""), subject):
+            continue
+
         os.makedirs(MEDIA_DIR, exist_ok=True)
         image_url = photo["src"]["large"]
         img_bytes = requests.get(image_url, timeout=15).content
@@ -138,7 +162,10 @@ def source_image(topic: dict) -> SourcedImage:
         return _make_diagram(topic)
 
     keywords = topic.get("photo_keywords", topic["prompt"])
-    image = _unsplash_search(keywords) or _pexels_search(keywords)
+    subject = topic["photo_subject"]
+    image = _unsplash_search(keywords, subject) or _pexels_search(keywords, subject)
     if image is None:
-        raise ImageSourcingError(f"no free-license photo found for keywords: {keywords!r}")
+        raise ImageSourcingError(
+            f"no free-license photo matching subject {subject!r} found for keywords: {keywords!r}"
+        )
     return image
