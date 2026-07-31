@@ -29,6 +29,11 @@ flowing one. Contractions throughout. No jargon left undefined — if you use a 
 explain it in the same breath. No emoji, no hashtags, no listicle formatting, no bolded labels. \
 Vary how each post opens — never start two posts the same way.
 
+For any topic touching cultural or religious traditions: stay strictly historical/comparative — \
+describe what different traditions do and where the practice came from. Never assert that any \
+belief is true or false, never rank or compare faiths, and never wade into current political or \
+sectarian controversy.
+
 Here are examples of the exact voice and pacing to match:
 
 ---
