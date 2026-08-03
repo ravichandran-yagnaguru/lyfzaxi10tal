@@ -23,11 +23,17 @@ import state
 import topics
 import validate
 from images import ImageSourcingError
+from validate_prompt import build_retry_hint
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("concept-bot")
 
 app = Flask(__name__)
+
+_bank_issues = topics.validate_bank()
+if _bank_issues:
+    logger.error("TOPIC_BANK_INVALID: %s", json.dumps(_bank_issues))
+    raise RuntimeError(f"topics.py failed validate_bank(): {_bank_issues}")
 
 
 def _opening_line(draft: str) -> str:
@@ -60,14 +66,17 @@ def run_pipeline(dry_run: bool) -> dict:
     tried_topic_ids: set = set()
     topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)
     failure_reasons: list[str] = []
+    retry_hint = ""
 
     for attempt in range(1, config.MAX_GENERATION_ATTEMPTS + 1):
         logger.info("Attempt %d/%d for topic '%s'", attempt, config.MAX_GENERATION_ATTEMPTS, topic["id"])
 
-        draft = generate.generate_draft(topic, recent_openings)
-        passed, reasons = validate.validate_draft(draft, recent_openings)
+        draft = generate.generate_draft(topic, recent_openings, retry_hint)
+        passed, reasons, scores = validate.validate_draft(draft, topic, recent_openings)
+        state.record_draft(topic["id"], topic["category"], passed, reasons, scores)
         if not passed:
             failure_reasons = reasons
+            retry_hint = build_retry_hint(scores) if scores else ""
             logger.info("Draft failed validation: %s", reasons)
             continue
 
@@ -79,6 +88,7 @@ def run_pipeline(dry_run: bool) -> dict:
             if topic["image_type"] == "photo":
                 tried_topic_ids.add(topic["id"])
                 topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)
+                retry_hint = ""
             continue
 
         opening_line = _opening_line(draft)

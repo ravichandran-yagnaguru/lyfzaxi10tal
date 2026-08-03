@@ -13,6 +13,7 @@ __pycache__/
 
 # Local state fallback (used only when Firestore isn't configured, e.g. local dry-run)
 local_state.json
+local_drafts.json
 
 # Generated media (diagrams / downloaded photos) — never commit binary output
 /tmp_media/

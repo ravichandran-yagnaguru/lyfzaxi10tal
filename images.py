@@ -20,7 +20,7 @@ import requests
 import config
 from llm_utils import extract_text
 
-_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3)
 
 MEDIA_DIR = "tmp_media"
 
@@ -117,9 +117,16 @@ def _unsplash_search(keywords: str, subject: str) -> SourcedImage | None:
         if not _matches_subject(description, subject):
             continue
 
-        os.makedirs(MEDIA_DIR, exist_ok=True)
         image_url = photo["urls"]["regular"]
-        img_bytes = requests.get(image_url, timeout=15).content
+        try:
+            resp = requests.get(image_url, timeout=15)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logging.warning("Unsplash image download failed, trying next candidate: %s", e)
+            continue
+        img_bytes = resp.content
+
+        os.makedirs(MEDIA_DIR, exist_ok=True)
         out_path = os.path.join(MEDIA_DIR, f"unsplash_{photo['id']}.jpg")
         with open(out_path, "wb") as f:
             f.write(img_bytes)
@@ -153,9 +160,16 @@ def _pexels_search(keywords: str, subject: str) -> SourcedImage | None:
         if not _matches_subject(photo.get("alt", ""), subject):
             continue
 
-        os.makedirs(MEDIA_DIR, exist_ok=True)
         image_url = photo["src"]["large"]
-        img_bytes = requests.get(image_url, timeout=15).content
+        try:
+            resp = requests.get(image_url, timeout=15)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logging.warning("Pexels image download failed, trying next candidate: %s", e)
+            continue
+        img_bytes = resp.content
+
+        os.makedirs(MEDIA_DIR, exist_ok=True)
         out_path = os.path.join(MEDIA_DIR, f"pexels_{photo['id']}.jpg")
         with open(out_path, "wb") as f:
             f.write(img_bytes)

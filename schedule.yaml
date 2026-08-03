@@ -2,15 +2,24 @@
 # then re-run manage_schedule.py to sync live Cloud Scheduler jobs to match
 # (no Cloud Run redeploy needed). Days with identical time lists share the
 # same Cloud Scheduler job (via cron's day-of-week list), and since every
-# time below is on the hour, each day-group's 4 times pack into a single
-# cron hour-list -- so 4 posts/day across all 7 days still costs only 3
-# Cloud Scheduler jobs (within the free tier). Every gap is >= 3 hours.
-timezone: "America/Los_Angeles"
+# time below is on the hour, every day sharing the same 2 times collapses to
+# a single Cloud Scheduler job (well within the free tier of 3).
+#
+# Cut from 4/day to 2/day per the growth strategy doc (docs/GROWTH_STRATEGY.md
+# section 6): per-post engagement rate is what the ranking system scores, and
+# posting above what the quality gate can sustain dilutes that ratio. Ramp
+# back up only once the gate is calibrated and per-post engagement is
+# measured against real outcomes.
+#
+# Re-anchored Pacific -> Eastern: the English-language audience density sits
+# on ET, and peak windows are 8-10am, 12-2pm, 5-7pm ET. The two slots below
+# land in the morning and evening windows.
+timezone: "America/New_York"
 weekly_schedule:
-  monday:    ["08:00", "11:00", "15:00", "19:00"]
-  tuesday:   ["09:00", "12:00", "16:00", "20:00"]
-  wednesday: ["10:00", "13:00", "17:00", "21:00"]
-  thursday:  ["08:00", "11:00", "15:00", "19:00"]   # same as monday
-  friday:    ["09:00", "12:00", "16:00", "20:00"]   # same as tuesday
-  saturday:  ["10:00", "13:00", "17:00", "21:00"]   # same as wednesday
-  sunday:    ["09:00", "12:00", "16:00", "20:00"]   # same as tuesday
+  monday:    ["09:00", "18:00"]
+  tuesday:   ["09:00", "18:00"]
+  wednesday: ["09:00", "18:00"]
+  thursday:  ["09:00", "18:00"]
+  friday:    ["09:00", "18:00"]
+  saturday:  ["09:00", "18:00"]
+  sunday:    ["09:00", "18:00"]

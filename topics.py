@@ -1,128 +1,1017 @@
-"""Topic bank + selection logic. Selection reads recent post history (passed in
-from state.py) so it can avoid repeating a category back-to-back and avoid
-reusing a topic until the bank cycles.
 """
+concept-bot topic bank — v2, rebuilt Door-first.
+
+CHANGE FROM v1
+--------------
+v1 stored topics subject-first ("explain sharding"). The generator therefore
+started from the subject and had to reverse-engineer a way in. That produced
+the sharding and music-chord failures: technically correct, universally
+unreadable.
+
+v2 stores every topic Door-first. The `universal_door` field is the entry
+point that ~every human has personally lived, regardless of age, education,
+region, or job. The generator is required to enter through it.
+
+SCHEMA
+------
+id                 stable identifier, used in post_history
+category           body | everyday | tech | science | psychology | money | history
+prompt             what to actually explain (the mechanism)
+universal_door     the lived experience that is the ONLY permitted entry point
+hook_seed          seed for the opening line; <= 12 words; generator may rephrase
+                   but must not raise the reading cost
+dinner_table_line  the retellable sentence this post must deliver.
+                   If the draft doesn't land something like this, it fails the gate.
+emotion            surprise | amusement | alarm | awe | wrong
+                   (rotated for variable reward — see state.py selection)
+image_type         diagram | photo
+photo_keywords     search query, photo topics only
+photo_subject      singular noun the photo's own description must mention
+
+BACKWARD COMPATIBILITY
+----------------------
+Existing selection logic reads only `id`, `category`, `image_type`,
+`photo_keywords`, `photo_subject`. Those are unchanged in name and meaning,
+so pick_next_topic() works untouched. New fields are additive and consumed
+by generate.py / validate.py.
+"""
+
+from __future__ import annotations
+
 import random
 
-TOPICS = [
-    # --- technology ---
-    {"id": "cfs_scheduler", "category": "tech", "prompt": "the Linux CFS (Completely Fair Scheduler) and how it decides which process runs next", "image_type": "diagram"},
-    {"id": "keda", "category": "tech", "prompt": "KEDA (Kubernetes Event-Driven Autoscaling) and how it scales workloads based on event/queue depth instead of just CPU", "image_type": "diagram"},
-    {"id": "ocr", "category": "tech", "prompt": "OCR (optical character recognition) and how software turns a photo of text into actual editable text", "image_type": "photo", "photo_keywords": "scanning document text closeup", "photo_subject": "document"},
-    {"id": "iac", "category": "tech", "prompt": "infrastructure as code (IaC) and why teams describe servers/cloud resources in text files instead of clicking through a console", "image_type": "diagram"},
-    {"id": "backpressure", "category": "tech", "prompt": "backpressure in software systems, and what happens when a fast producer overwhelms a slow consumer", "image_type": "diagram"},
-    {"id": "circuit_breaker", "category": "tech", "prompt": "the circuit breaker pattern in distributed systems and how it stops one failing service from taking down everything else", "image_type": "diagram"},
-    {"id": "indexing", "category": "tech", "prompt": "database indexing and why looking something up by an indexed column is so much faster than a full table scan", "image_type": "photo", "photo_keywords": "book index pages", "photo_subject": "index"},
-    {"id": "partitioning", "category": "tech", "prompt": "database partitioning and how splitting one huge table into smaller chunks speeds things up", "image_type": "diagram"},
-    {"id": "sharding", "category": "tech", "prompt": "database sharding and how it spreads data across multiple machines instead of one", "image_type": "diagram"},
-    {"id": "rag", "category": "tech", "prompt": "RAG (retrieval-augmented generation) and how it lets an AI model answer using documents it was never trained on", "image_type": "diagram"},
-    {"id": "embeddings", "category": "tech", "prompt": "embeddings and how turning words into lists of numbers lets computers tell that 'dog' and 'puppy' are related", "image_type": "diagram"},
-    {"id": "cdn", "category": "tech", "prompt": "CDNs (content delivery networks) and why a video loads faster when a copy is sitting physically closer to you", "image_type": "diagram"},
-    {"id": "idempotency", "category": "tech", "prompt": "idempotency in APIs and why retrying a request safely shouldn't double-charge or double-create anything", "image_type": "diagram"},
-    {"id": "cgroups", "category": "tech", "prompt": "Linux cgroups and how they let the OS put a hard limit on how much CPU/memory one process is allowed to hog", "image_type": "diagram"},
-    {"id": "ctrl_z", "category": "tech", "prompt": "Ctrl+Z (undo) and how software actually keeps track of everything you've done so it can reverse it", "image_type": "photo", "photo_keywords": "keyboard keys closeup", "photo_subject": "keyboard"},
-    {"id": "deleted_files", "category": "tech", "prompt": "why a 'deleted' file usually isn't actually gone right away, and what your computer really does when you delete something", "image_type": "diagram"},
-    {"id": "banana_problem", "category": "tech", "prompt": "the 'banana problem' in software dependencies: you wanted a banana, but you got the gorilla holding the banana, and the whole jungle behind it", "image_type": "diagram"},
+TOPICS: list[dict] = [
 
-    # --- psychology ---
-    {"id": "zeigarnik", "category": "psychology", "prompt": "the Zeigarnik effect: why unfinished tasks nag at your memory way more than finished ones", "image_type": "diagram"},
-    {"id": "dunning_kruger", "category": "psychology", "prompt": "the Dunning-Kruger effect and why people with the least skill in something are often the most confident about it", "image_type": "diagram"},
-    {"id": "placebo_effect", "category": "psychology", "prompt": "the placebo effect and how a fake treatment with no active ingredient can still measurably help people feel better", "image_type": "photo", "photo_keywords": "white pills bottle", "photo_subject": "pill"},
-    {"id": "bystander_effect", "category": "psychology", "prompt": "the bystander effect and why someone is less likely to help in an emergency the more other people are standing around", "image_type": "photo", "photo_keywords": "crowd of people city street", "photo_subject": "crowd"},
-    {"id": "baader_meinhof", "category": "psychology", "prompt": "the Baader-Meinhof phenomenon (frequency illusion): why you suddenly start noticing something everywhere right after you first learn about it", "image_type": "photo", "photo_keywords": "cars parked on street", "photo_subject": "car"},
-    {"id": "deja_vu", "category": "psychology", "prompt": "deja vu: what neuroscience actually knows (and doesn't) about why a brand-new moment can feel like a repeat", "image_type": "diagram"},
-    {"id": "mandela_effect", "category": "psychology", "prompt": "the Mandela effect: why large numbers of unrelated people can confidently share the exact same false memory", "image_type": "diagram"},
-    {"id": "time_speeds_up", "category": "psychology", "prompt": "why time feels like it speeds up as you get older, and the actual perception theories behind it", "image_type": "diagram"},
-    {"id": "cant_tickle_self", "category": "psychology", "prompt": "why you can't tickle yourself: the brain's own prediction system canceling out the sensation", "image_type": "diagram"},
-    {"id": "dunbar_number", "category": "psychology", "prompt": "the Dunbar number: the cognitive cap on how many stable relationships a person's brain can realistically maintain", "image_type": "diagram"},
+    # ---------------------------------------------------------------- BODY
+    # Highest-universality category. Everyone has a body. Lead with these.
+    {
+        "id": "doorway_effect",
+        "category": "body",
+        "prompt": (
+            "The doorway effect: memory is chunked by context, and physically "
+            "crossing a boundary flushes the working-memory buffer tied to the "
+            "previous room."
+        ),
+        "universal_door": "Walking into a room and instantly forgetting why.",
+        "hook_seed": "You walk into the kitchen and forget why. Every time.",
+        "dinner_table_line": (
+            "It isn't your memory failing — the doorway itself wipes it, "
+            "and walking back actually helps."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "earworms",
+        "category": "body",
+        "prompt": (
+            "Earworms: the brain's auditory loop treats an unfinished musical "
+            "phrase as an open task and rehearses it involuntarily."
+        ),
+        "universal_door": "A song stuck on loop in your head for a whole day.",
+        "hook_seed": "That song has been in your head since morning. Here's why.",
+        "dinner_table_line": (
+            "Your brain loops it because it never heard the ending — "
+            "playing the song all the way through usually kills it."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "own_voice",
+        "category": "body",
+        "prompt": (
+            "Bone conduction: you normally hear your voice through skull "
+            "vibration plus air, which adds low frequencies a recording lacks."
+        ),
+        "universal_door": "Hearing a recording of your own voice and cringing.",
+        "hook_seed": "Your recorded voice sounds wrong. The recording is right.",
+        "dinner_table_line": (
+            "Everyone else has only ever heard the version you hate — "
+            "the voice in your head is the fake one."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
+    {
+        "id": "time_speeds_up",
+        "category": "body",
+        "prompt": (
+            "Why subjective time accelerates with age: memory density. Novel "
+            "experiences lay down more markers; routine compresses to almost "
+            "nothing in recall."
+        ),
+        "universal_door": "Childhood summers felt endless. Now a year vanishes.",
+        "hook_seed": "A year used to be forever. Now it's gone by March.",
+        "dinner_table_line": (
+            "Time doesn't speed up — you just stop making new memories, "
+            "so there's nothing to measure it against."
+        ),
+        "emotion": "awe",
+        "image_type": "diagram",
+    },
+    {
+        "id": "hypnic_jerk",
+        "category": "body",
+        "prompt": (
+            "Hypnic jerks: as muscles go slack at sleep onset, the brain "
+            "sometimes misreads the loss of tone as falling and fires a "
+            "protective startle."
+        ),
+        "universal_door": "Jolting awake with the feeling of falling.",
+        "hook_seed": "You've felt yourself fall while lying perfectly still.",
+        "dinner_table_line": (
+            "Your brain briefly thinks you're falling out of a tree — "
+            "it's a reflex older than the human species."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "contagious_yawning",
+        "category": "body",
+        "prompt": (
+            "Contagious yawning as involuntary social mirroring, and the "
+            "finding that it tracks emotional closeness to the yawner."
+        ),
+        "universal_door": "Yawning because someone near you yawned.",
+        "hook_seed": "Someone yawns. You yawn. You didn't decide to.",
+        "dinner_table_line": (
+            "You catch yawns hardest from people you're closest to — "
+            "it's a rough measure of who you actually care about."
+        ),
+        "emotion": "surprise",
+        "image_type": "photo",
+        "photo_keywords": "person yawning",
+        "photo_subject": "yawn",
+    },
+    {
+        "id": "music_chills",
+        "category": "body",
+        "prompt": (
+            "Frisson: the chill from music arrives at moments of violated "
+            "musical expectation — the reward system firing on prediction error."
+        ),
+        "universal_door": "Goosebumps at one specific moment in a song.",
+        "hook_seed": "One moment in a song gives you chills. Always the same moment.",
+        "dinner_table_line": (
+            "The chill isn't beauty — it's your brain being surprised, "
+            "which is why it fades once you know the song too well."
+        ),
+        "emotion": "awe",
+        "image_type": "diagram",
+    },
+    {
+        "id": "cant_tickle_self",
+        "category": "body",
+        "prompt": (
+            "The cerebellum predicts the sensory result of your own movements "
+            "and cancels the signal — self-generated touch is pre-subtracted."
+        ),
+        "universal_door": "Trying to tickle yourself and feeling nothing.",
+        "hook_seed": "Try to tickle yourself. Nothing. There's a reason.",
+        "dinner_table_line": (
+            "Your brain deletes sensations it caused itself — "
+            "which is also why you can't surprise yourself."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
 
-    # --- everyday science ---
-    {"id": "onions_cry", "category": "science", "prompt": "why cutting onions makes you cry, down to the actual chemistry happening at your eyeball", "image_type": "photo", "photo_keywords": "sliced onion cutting board kitchen", "photo_subject": "onion"},
-    {"id": "ice_floats", "category": "science", "prompt": "why ice floats instead of sinking, and why that's actually a weird exception for how most substances behave when they freeze", "image_type": "photo", "photo_keywords": "ice cubes floating water", "photo_subject": "ice"},
-    {"id": "sky_blue", "category": "science", "prompt": "why the sky is blue during the day and orange/red at sunset, same sunlight, different result", "image_type": "photo", "photo_keywords": "blue sky daytime clouds", "photo_subject": "sky"},
-    {"id": "microwave_uneven", "category": "science", "prompt": "why microwaves heat food unevenly, leaving some bites cold and others molten", "image_type": "photo", "photo_keywords": "microwave oven kitchen", "photo_subject": "microwave"},
-    {"id": "battery_cold", "category": "science", "prompt": "why phone batteries drain so much faster in cold weather", "image_type": "photo", "photo_keywords": "smartphone winter cold outdoors", "photo_subject": "phone"},
-    {"id": "goosebumps", "category": "science", "prompt": "goosebumps: the evolutionary leftover reflex from a coat of fur we no longer have", "image_type": "diagram"},
-    {"id": "fireworks_colors", "category": "science", "prompt": "why fireworks come in so many different colors: the metal salts and chemistry behind each hue", "image_type": "photo", "photo_keywords": "colorful fireworks night sky", "photo_subject": "fireworks"},
+    # ----------------------------------------------------------- EVERYDAY
+    # Objects and design. Universal because the object is in everyone's life.
+    {
+        "id": "round_airplane_windows",
+        "category": "everyday",
+        "prompt": (
+            "Square windows concentrate stress at the corners. The de Havilland "
+            "Comet losses in the 1950s traced metal fatigue to corner cracking; "
+            "curves distribute the load."
+        ),
+        "universal_door": "Every plane window you've ever looked out of is rounded.",
+        "hook_seed": "Plane windows are round. People died to learn that.",
+        "dinner_table_line": (
+            "Square windows tore planes apart at the corners — "
+            "the curve is a lesson written in wreckage."
+        ),
+        "emotion": "alarm",
+        "image_type": "photo",
+        "photo_keywords": "airplane window seat view",
+        "photo_subject": "window",
+    },
+    {
+        "id": "placebo_buttons",
+        "category": "everyday",
+        "prompt": (
+            "Placebo buttons: many door-close and crosswalk buttons are "
+            "disconnected, retained because perceived control reduces "
+            "frustration during waiting."
+        ),
+        "universal_door": "Jabbing the elevator close button repeatedly.",
+        "hook_seed": "That elevator close button probably isn't connected to anything.",
+        "dinner_table_line": (
+            "It's there so you feel in control while you wait — "
+            "and it genuinely works, even though the button doesn't."
+        ),
+        "emotion": "wrong",
+        "image_type": "photo",
+        "photo_keywords": "elevator buttons panel",
+        "photo_subject": "button",
+    },
+    {
+        "id": "phantom_traffic_jams",
+        "category": "everyday",
+        "prompt": (
+            "Phantom jams: one driver braking slightly propagates backward as a "
+            "compression wave, so a jam persists long after any cause is gone."
+        ),
+        "universal_door": "Crawling in traffic, then it clears with no accident.",
+        "hook_seed": "Traffic stops. Then clears. There was never a crash.",
+        "dinner_table_line": (
+            "You were sitting in a wave — one person tapped their brakes "
+            "twenty minutes ago and it's still travelling backwards."
+        ),
+        "emotion": "awe",
+        "image_type": "diagram",
+    },
+    {
+        "id": "milk_at_back",
+        "category": "everyday",
+        "prompt": (
+            "Store layout: staples are placed furthest from the entrance so the "
+            "path to them passes maximum unplanned-purchase surface area."
+        ),
+        "universal_door": "Walking the whole shop for one carton of milk.",
+        "hook_seed": "Milk is always at the back. That's not an accident.",
+        "dinner_table_line": (
+            "The shop is designed so you can never buy just one thing — "
+            "the walk is the product."
+        ),
+        "emotion": "wrong",
+        "image_type": "photo",
+        "photo_keywords": "supermarket dairy aisle refrigerator",
+        "photo_subject": "supermarket",
+    },
+    {
+        "id": "round_manhole_covers",
+        "category": "everyday",
+        "prompt": (
+            "A circle is the only common shape with constant width, so a round "
+            "cover cannot be rotated to fall through its own opening."
+        ),
+        "universal_door": "Stepping over a manhole cover on any street on earth.",
+        "hook_seed": "Manhole covers are round for one very specific reason.",
+        "dinner_table_line": (
+            "A square cover can be turned diagonally and dropped down the hole. "
+            "A circle can't fall into itself."
+        ),
+        "emotion": "surprise",
+        "image_type": "photo",
+        "photo_keywords": "manhole cover street",
+        "photo_subject": "manhole",
+    },
+    {
+        "id": "cabin_lights_dim",
+        "category": "everyday",
+        "prompt": (
+            "Cabin lights are dimmed for night takeoff and landing so passengers' "
+            "eyes are already dark-adapted if an evacuation is needed."
+        ),
+        "universal_door": "The cabin going dark just before landing.",
+        "hook_seed": "They dim the cabin lights before landing. It's not for sleep.",
+        "dinner_table_line": (
+            "They're pre-adjusting your eyes to darkness in case you have to "
+            "run for an exit in the next ninety seconds."
+        ),
+        "emotion": "alarm",
+        "image_type": "photo",
+        "photo_keywords": "dim airplane cabin interior night",
+        "photo_subject": "cabin",
+    },
+    {
+        "id": "gas_pump_clicks",
+        "category": "everyday",
+        "prompt": (
+            "The auto-shutoff uses a Venturi tube: rising fuel blocks a small "
+            "air hole near the nozzle tip, and the pressure drop trips the valve "
+            "mechanically — no electronics."
+        ),
+        "universal_door": "The fuel nozzle clunking off by itself when the tank fills.",
+        "hook_seed": "The fuel nozzle stops itself. Nothing electronic is involved.",
+        "dinner_table_line": (
+            "It's pure physics — a tiny hole gets covered by fuel and the "
+            "pressure change slams the valve shut."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "ketchup_wont_pour",
+        "category": "everyday",
+        "prompt": (
+            "Ketchup is thixotropic: it behaves as a solid at rest and thins "
+            "under shear, so it resists then suddenly floods."
+        ),
+        "universal_door": "Nothing, nothing, nothing — then half the bottle.",
+        "hook_seed": "Ketchup comes out as nothing, then far too much.",
+        "dinner_table_line": (
+            "Ketchup is technically a solid until you shake it — "
+            "you're not pouring a liquid, you're breaking one."
+        ),
+        "emotion": "amusement",
+        "image_type": "photo",
+        "photo_keywords": "ketchup bottle pouring",
+        "photo_subject": "ketchup",
+    },
+    {
+        "id": "weep_holes",
+        "category": "everyday",
+        "prompt": (
+            "Weep holes: small gaps left in brickwork let trapped moisture drain "
+            "and ventilate the cavity behind the wall."
+        ),
+        "universal_door": "Small holes in the brick wall of almost every building.",
+        "hook_seed": "Those little holes in brick walls aren't mistakes.",
+        "dinner_table_line": (
+            "Every brick wall needs to breathe — seal those holes and the "
+            "wall rots from inside."
+        ),
+        "emotion": "surprise",
+        "image_type": "photo",
+        "photo_keywords": "brick wall weep holes mortar",
+        "photo_subject": "brick",
+    },
 
-    # --- history / origin curiosities ---
-    {"id": "barcode_vs_qr", "category": "history", "prompt": "the barcode versus the QR code: where each one came from and why QR codes can survive being partly covered or damaged", "image_type": "photo", "photo_keywords": "barcode scanner grocery checkout", "photo_subject": "barcode"},
-    {"id": "qwerty", "category": "history", "prompt": "the QWERTY keyboard layout, why it isn't alphabetical, and why it never got replaced once faster layouts existed", "image_type": "photo", "photo_keywords": "computer keyboard closeup", "photo_subject": "keyboard"},
-    {"id": "y2k", "category": "history", "prompt": "the Y2K bug: why storing years as two digits was a reasonable shortcut for decades until it suddenly wasn't", "image_type": "diagram"},
-    {"id": "driving_side", "category": "history", "prompt": "why some countries drive on the left and others on the right, and how that split actually happened", "image_type": "photo", "photo_keywords": "cars driving on road", "photo_subject": "car"},
-    {"id": "daylight_saving", "category": "history", "prompt": "daylight saving time: why it started, and why it has survived despite most people disliking it", "image_type": "diagram"},
-    {"id": "april_fools", "category": "history", "prompt": "the disputed origin of April Fools' Day, and why nobody can fully agree on how it started", "image_type": "diagram"},
-    {"id": "emu_war", "category": "history", "prompt": "the Great Emu War of 1932: Australia's real, actual military campaign against emus, and how it went", "image_type": "diagram"},
+    # --------------------------------------------------------------- TECH
+    # Tech ONLY through a door the non-technical reader has walked through.
+    # Never name the mechanism in the hook.
+    {
+        "id": "caching",
+        "category": "tech",
+        "prompt": (
+            "Caching: the second load is instant because the data never left "
+            "your device — explain via keeping frequently used things on the "
+            "desk instead of walking to the storeroom."
+        ),
+        "universal_door": "A video that buffered forever plays instantly on rewatch.",
+        "hook_seed": "The video buffered forever. Watch it again — instant. Why?",
+        "dinner_table_line": (
+            "Your phone quietly kept a copy — most of the internet's speed "
+            "is just not fetching things twice."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "sharding",
+        "category": "tech",
+        "prompt": (
+            "Sharding and horizontal scale: no single machine could serve "
+            "everyone, so data is split across many. Explain via one librarian "
+            "versus a library split into rooms by surname."
+        ),
+        "universal_door": "Two billion people open the same app at breakfast.",
+        "hook_seed": "Two billion people open Instagram at breakfast. It doesn't collapse.",
+        "dinner_table_line": (
+            "There is no 'the server' — you and your neighbour are being "
+            "served by completely different machines."
+        ),
+        "emotion": "awe",
+        "image_type": "diagram",
+    },
+    {
+        "id": "wifi_crowded",
+        "category": "tech",
+        "prompt": (
+            "Shared airtime: wifi is one conversation everyone takes turns in, "
+            "so more devices means more waiting, not a thinner pipe."
+        ),
+        "universal_door": "Hotel wifi dying the moment the conference starts.",
+        "hook_seed": "Hotel wifi dies when the hotel fills up. Not the reason you think.",
+        "dinner_table_line": (
+            "Wifi isn't a pipe being shared — it's one person talking at a "
+            "time, and everyone else is queueing."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
+    {
+        "id": "deleted_not_deleted",
+        "category": "tech",
+        "prompt": (
+            "Deletion removes the index entry, not the data — the space is "
+            "marked reusable. Explain via tearing out the contents page rather "
+            "than the chapters."
+        ),
+        "universal_door": "Deleting a photo and assuming it's gone.",
+        "hook_seed": "You deleted the file. It's still there.",
+        "dinner_table_line": (
+            "Deleting only rips out the index page — the file sits there "
+            "until something else happens to land on top of it."
+        ),
+        "emotion": "alarm",
+        "image_type": "diagram",
+    },
+    {
+        "id": "battery_percentage",
+        "category": "tech",
+        "prompt": (
+            "Battery percentage is an estimate from voltage curves, not a fuel "
+            "gauge — which is why it jumps and why the last 10% behaves oddly."
+        ),
+        "universal_door": "Your phone dropping from 20% to dead in minutes.",
+        "hook_seed": "Your battery percentage is a guess. Often a bad one.",
+        "dinner_table_line": (
+            "Nothing in your phone can actually measure how much charge is "
+            "left — it's inferring it, and it gets worse as the battery ages."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
+    {
+        "id": "loading_bars_lie",
+        "category": "tech",
+        "prompt": (
+            "Progress bars are often non-linear or fabricated because perceived "
+            "wait time drops when progress appears to accelerate."
+        ),
+        "universal_door": "A progress bar stuck at 99% forever.",
+        "hook_seed": "The loading bar stuck at 99% was lying to you.",
+        "dinner_table_line": (
+            "Many progress bars show no real progress at all — they're "
+            "designed to make waiting feel shorter, not to inform you."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
+    {
+        "id": "phone_slows_down",
+        "category": "tech",
+        "prompt": (
+            "Perceived slowdown: software grows to assume newer hardware while "
+            "storage fills and the battery degrades, so the same chip does more "
+            "work with less headroom."
+        ),
+        "universal_door": "A phone that felt fast two years ago now feels sluggish.",
+        "hook_seed": "Your phone got slower. The hardware didn't change.",
+        "dinner_table_line": (
+            "The phone didn't slow down — the software got heavier around it "
+            "while the battery quietly lost its ability to deliver peak power."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "free_apps",
+        "category": "tech",
+        "prompt": (
+            "Attention and data as the actual product: free apps monetise "
+            "predicted behaviour, so engagement design is the business model."
+        ),
+        "universal_door": "Apps that cost nothing yet fund enormous companies.",
+        "hook_seed": "The app was free. Someone still paid for it.",
+        "dinner_table_line": (
+            "You're not the customer — the advertiser is, and what's being "
+            "sold is a prediction about what you'll do next."
+        ),
+        "emotion": "alarm",
+        "image_type": "diagram",
+    },
+    {
+        "id": "airplane_mode",
+        "category": "tech",
+        "prompt": (
+            "Airplane mode exists less for the aircraft and more for the ground "
+            "network: a phone at altitude hits many towers at once. Explain the "
+            "actual risk honestly rather than the myth."
+        ),
+        "universal_door": "Being told to switch on airplane mode, every single flight.",
+        "hook_seed": "Airplane mode isn't really protecting the plane.",
+        "dinner_table_line": (
+            "Your phone at 30,000 feet screams at hundreds of ground towers "
+            "at once — the network is what's being protected."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
 
-    # --- health & the human body ---
-    {"id": "hiccups", "category": "health", "prompt": "why we hiccup, and why such a small reflex is so notoriously hard to stop on command", "image_type": "diagram"},
-    {"id": "yawning_contagious", "category": "health", "prompt": "why yawning is contagious, and what that has to do with empathy and social bonding", "image_type": "diagram"},
-    {"id": "brain_freeze", "category": "health", "prompt": "brain freeze: why eating something cold too fast can cause sudden head pain", "image_type": "photo", "photo_keywords": "person eating ice cream", "photo_subject": "ice cream"},
-    {"id": "why_we_blush", "category": "health", "prompt": "why we blush, the one involuntary human expression that's basically impossible to fake or suppress", "image_type": "diagram"},
-    {"id": "muscle_soreness", "category": "health", "prompt": "why your muscles get sore a day or two after a hard workout, not right away", "image_type": "diagram"},
+    # ------------------------------------------------------------ SCIENCE
+    # Kitchen and body chemistry. The lab is everyone's house.
+    {
+        "id": "onion_tears",
+        "category": "science",
+        "prompt": (
+            "Cutting ruptures cells, releasing enzymes that form a volatile "
+            "sulfur compound; it reacts with eye moisture to form a mild acid, "
+            "and tears are the flush response."
+        ),
+        "universal_door": "Crying over a chopping board.",
+        "hook_seed": "Onions don't make you cry. They make acid in your eyes.",
+        "dinner_table_line": (
+            "The onion is releasing a gas that turns into acid the moment it "
+            "touches your eye — the tears are your body rinsing it out."
+        ),
+        "emotion": "alarm",
+        "image_type": "photo",
+        "photo_keywords": "chopped onion cutting board",
+        "photo_subject": "onion",
+    },
+    {
+        "id": "cloudy_ice",
+        "category": "science",
+        "prompt": (
+            "Ice freezes from the outside in, pushing dissolved air and "
+            "impurities to the last-frozen centre — the cloud is trapped gas."
+        ),
+        "universal_door": "Home ice cubes are cloudy; bar ice is clear.",
+        "hook_seed": "Your ice cubes are cloudy in the middle. Bar ice isn't.",
+        "dinner_table_line": (
+            "That cloud is trapped air — clear ice is just ice that was "
+            "frozen slowly enough for the air to escape."
+        ),
+        "emotion": "surprise",
+        "image_type": "photo",
+        "photo_keywords": "ice cubes glass close up",
+        "photo_subject": "ice",
+    },
+    {
+        "id": "apple_browning",
+        "category": "science",
+        "prompt": (
+            "Enzymatic browning: cutting exposes an enzyme to oxygen, producing "
+            "pigment. Acid (lemon) slows the enzyme, which is why it works."
+        ),
+        "universal_door": "A cut apple going brown in your lunchbox.",
+        "hook_seed": "A cut apple turns brown. It's not drying out.",
+        "dinner_table_line": (
+            "The apple is rusting, more or less — and a squeeze of lemon "
+            "stops it by shutting the enzyme down."
+        ),
+        "emotion": "surprise",
+        "image_type": "photo",
+        "photo_keywords": "sliced apple browning",
+        "photo_subject": "apple",
+    },
+    {
+        "id": "microwave_uneven",
+        "category": "science",
+        "prompt": (
+            "Standing waves create hot and cold spots; the turntable exists to "
+            "drag food through them. Edges absorb more energy than the centre."
+        ),
+        "universal_door": "Food scalding at the edge and frozen in the middle.",
+        "hook_seed": "Boiling at the edges, ice in the middle. Every time.",
+        "dinner_table_line": (
+            "There are fixed hot and cold spots inside your microwave — "
+            "the turntable exists purely to smear food through both."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "spicy_sweat",
+        "category": "science",
+        "prompt": (
+            "Capsaicin binds the heat receptor directly, so the nervous system "
+            "reports burning that isn't happening and cools a body that isn't hot."
+        ),
+        "universal_door": "Sweating through a plate of hot food.",
+        "hook_seed": "Spicy food isn't hot. Your nerves just think it is.",
+        "dinner_table_line": (
+            "Chilli picks the lock on your heat sensor — you sweat because "
+            "your body is fighting a temperature that doesn't exist."
+        ),
+        "emotion": "wrong",
+        "image_type": "photo",
+        "photo_keywords": "red chili peppers",
+        "photo_subject": "chili",
+    },
+    {
+        "id": "bananas_ripen",
+        "category": "science",
+        "prompt": (
+            "Ethylene gas: ripening fruit emits a hormone that triggers "
+            "ripening in neighbours — a chemical broadcast."
+        ),
+        "universal_door": "One bad banana taking the whole bowl down with it.",
+        "hook_seed": "One ripe banana ruins the bowl. It's contagious.",
+        "dinner_table_line": (
+            "Fruit talks to other fruit with a gas — one banana can order "
+            "the entire bowl to ripen."
+        ),
+        "emotion": "awe",
+        "image_type": "photo",
+        "photo_keywords": "bananas fruit bowl ripe",
+        "photo_subject": "banana",
+    },
+    {
+        "id": "reheated_coffee",
+        "category": "science",
+        "prompt": (
+            "Aromatic compounds are volatile and escape first; reheating drives "
+            "off what's left and further oxidises bitter compounds."
+        ),
+        "universal_door": "Microwaving cold coffee and regretting it.",
+        "hook_seed": "Reheated coffee tastes wrong. The good part already left.",
+        "dinner_table_line": (
+            "Most of coffee's flavour is smell, and the smell physically "
+            "evaporated while the cup sat there."
+        ),
+        "emotion": "surprise",
+        "image_type": "photo",
+        "photo_keywords": "cold coffee cup mug",
+        "photo_subject": "coffee",
+    },
+    {
+        "id": "bread_stales_fridge",
+        "category": "science",
+        "prompt": (
+            "Staling is starch retrogradation, not drying — and it runs fastest "
+            "just above freezing, so the fridge is the worst place for bread."
+        ),
+        "universal_door": "Putting bread in the fridge to keep it fresh.",
+        "hook_seed": "The fridge is the worst possible place for bread.",
+        "dinner_table_line": (
+            "Bread goes stale fastest at fridge temperature — the freezer is "
+            "fine, the counter is fine, the fridge is the one bad option."
+        ),
+        "emotion": "wrong",
+        "image_type": "photo",
+        "photo_keywords": "sliced bread loaf",
+        "photo_subject": "bread",
+    },
 
-    # --- space & astronomy ---
-    {"id": "olbers_paradox", "category": "space", "prompt": "Olbers' paradox: if the universe has countless stars, why is the night sky dark instead of blazing white", "image_type": "diagram"},
-    {"id": "moon_illusion", "category": "space", "prompt": "the moon illusion: why the moon looks dramatically bigger near the horizon than high in the sky, even though it isn't", "image_type": "photo", "photo_keywords": "full moon night sky", "photo_subject": "moon"},
-    {"id": "black_holes", "category": "space", "prompt": "what a black hole actually is in plain terms, without the sci-fi mystique", "image_type": "diagram"},
-    {"id": "why_stars_twinkle", "category": "space", "prompt": "why stars twinkle but planets don't, when you look up at the night sky", "image_type": "diagram"},
-    {"id": "tides", "category": "space", "prompt": "how the moon's gravity pulls ocean tides in and out twice a day", "image_type": "diagram"},
+    # --------------------------------------------------------- PSYCHOLOGY
+    {
+        "id": "baader_meinhof",
+        "category": "psychology",
+        "prompt": (
+            "Frequency illusion: selective attention plus confirmation bias make "
+            "a newly salient thing appear to surge in the world."
+        ),
+        "universal_door": "Buying a car, then seeing that car everywhere.",
+        "hook_seed": "You bought the car. Now that car is everywhere.",
+        "dinner_table_line": (
+            "They were always there — your brain just started filing them "
+            "instead of discarding them."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "zeigarnik",
+        "category": "psychology",
+        "prompt": (
+            "The Zeigarnik effect: unfinished tasks occupy memory more "
+            "persistently than completed ones — which is why cliffhangers work."
+        ),
+        "universal_door": "An unfinished task nagging at you all evening.",
+        "hook_seed": "Finished tasks vanish from your head. Unfinished ones don't.",
+        "dinner_table_line": (
+            "Your brain refuses to close a loop — which is exactly why you "
+            "can't stop watching a series that ends every episode mid-scene."
+        ),
+        "emotion": "surprise",
+        "image_type": "diagram",
+    },
+    {
+        "id": "bystander_effect",
+        "category": "psychology",
+        "prompt": (
+            "Diffusion of responsibility: help becomes less likely as the crowd "
+            "grows. Include the practical fix — address one specific person."
+        ),
+        "universal_door": "A crowded street where nobody stops to help.",
+        "hook_seed": "In a crowd, fewer people help. Not more.",
+        "dinner_table_line": (
+            "If you ever need help in a crowd, point at one person and speak "
+            "to them directly — a crowd helps nobody, a person helps."
+        ),
+        "emotion": "alarm",
+        "image_type": "diagram",
+    },
+    {
+        "id": "cringe_at_2am",
+        "category": "psychology",
+        "prompt": (
+            "Why old embarrassments resurface at night: reduced cognitive load "
+            "plus the emotional weighting that made the memory durable."
+        ),
+        "universal_door": "Remembering something humiliating from ten years ago, in bed.",
+        "hook_seed": "It's 2am and your brain picked 2011 to relitigate.",
+        "dinner_table_line": (
+            "Embarrassment is stored more strongly than almost anything else — "
+            "your brain filed it as a survival threat."
+        ),
+        "emotion": "amusement",
+        "image_type": "diagram",
+    },
+    {
+        "id": "cocktail_party",
+        "category": "psychology",
+        "prompt": (
+            "The cocktail party effect: unattended audio is monitored below "
+            "awareness, and your own name breaks through the filter."
+        ),
+        "universal_door": "Hearing your name across a loud room.",
+        "hook_seed": "You hear your name across a loud room. You weren't listening.",
+        "dinner_table_line": (
+            "Something in you is listening to every conversation in the room, "
+            "all the time — it just only interrupts for your name."
+        ),
+        "emotion": "awe",
+        "image_type": "diagram",
+    },
+    {
+        "id": "peak_end_rule",
+        "category": "psychology",
+        "prompt": (
+            "Peak-end rule: an experience is remembered by its most intense "
+            "moment and its ending, not its average or duration."
+        ),
+        "universal_door": "A great holiday ruined in memory by the last day.",
+        "hook_seed": "You don't remember experiences. You remember two moments.",
+        "dinner_table_line": (
+            "Your memory scores everything by its peak and its ending — "
+            "which means how something finishes matters more than how long it was good."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
+    {
+        "id": "negativity_bias",
+        "category": "psychology",
+        "prompt": (
+            "Negativity bias: threat information is processed faster and "
+            "weighted heavier, which is why bad news outruns good."
+        ),
+        "universal_door": "Nine compliments and one criticism — you remember the one.",
+        "hook_seed": "Nine people praised you. You're thinking about the tenth.",
+        "dinner_table_line": (
+            "Bad news is processed faster than good news because the ancestors "
+            "who ignored threats didn't become anyone's ancestors."
+        ),
+        "emotion": "awe",
+        "image_type": "diagram",
+    },
+    {
+        "id": "spotlight_effect",
+        "category": "psychology",
+        "prompt": (
+            "The spotlight effect: we drastically overestimate how much others "
+            "notice our appearance and mistakes."
+        ),
+        "universal_door": "Being convinced everyone noticed the stain on your shirt.",
+        "hook_seed": "Nobody noticed. You've been sure for hours that they did.",
+        "dinner_table_line": (
+            "Everyone is starring in their own film and you're an extra in "
+            "all of them — which is oddly freeing."
+        ),
+        "emotion": "amusement",
+        "image_type": "diagram",
+    },
 
-    # --- food & culture ---
-    {"id": "bread_rises", "category": "food", "prompt": "why bread dough rises: the yeast fermentation and gluten science behind it", "image_type": "photo", "photo_keywords": "bread dough baking kitchen", "photo_subject": "bread"},
-    {"id": "coffee_trade_history", "category": "food", "prompt": "how the coffee trade shaped world history, from a herder's legend to a global economy", "image_type": "photo", "photo_keywords": "coffee beans roasted", "photo_subject": "coffee"},
-    {"id": "why_spicy_burns", "category": "food", "prompt": "why spicy food actually 'burns': capsaicin tricking the same pain receptors that detect real heat", "image_type": "photo", "photo_keywords": "chili peppers closeup", "photo_subject": "chili"},
-    {"id": "airplane_food_taste", "category": "food", "prompt": "why airplane food tastes bland: how cabin pressure and dry air dull your taste buds mid-flight", "image_type": "diagram"},
+    # -------------------------------------------------------------- MONEY
+    {
+        "id": "prices_end_99",
+        "category": "money",
+        "prompt": (
+            "Left-digit anchoring: the first digit is encoded before the rest, "
+            "so 4.99 files closer to 4 than to 5."
+        ),
+        "universal_door": "Every price tag you have ever looked at.",
+        "hook_seed": "4.99 lands in your head as four. Not five.",
+        "dinner_table_line": (
+            "Your brain reads the first digit and commits before it finishes "
+            "the number — the 99 is aimed at that gap."
+        ),
+        "emotion": "wrong",
+        "image_type": "photo",
+        "photo_keywords": "price tag store label",
+        "photo_subject": "price",
+    },
+    {
+        "id": "slow_music_shops",
+        "category": "money",
+        "prompt": (
+            "Tempo and pace: slower music slows walking speed, extends dwell "
+            "time and raises spend — measured in supermarket field studies."
+        ),
+        "universal_door": "The oddly relaxed music in every supermarket.",
+        "hook_seed": "The supermarket music is slow on purpose. You walk slower.",
+        "dinner_table_line": (
+            "Slow music makes you walk slower, and walking slower makes you "
+            "buy more — it's measurable, and it's why the playlist never changes tempo."
+        ),
+        "emotion": "wrong",
+        "image_type": "photo",
+        "photo_keywords": "supermarket aisle shopping",
+        "photo_subject": "supermarket",
+    },
+    {
+        "id": "card_vs_cash",
+        "category": "money",
+        "prompt": (
+            "The pain of paying: physical cash produces a stronger loss signal "
+            "than a card tap, so identical purchases feel cheaper on card."
+        ),
+        "universal_door": "Tapping a card and barely registering the amount.",
+        "hook_seed": "The same price hurts less on a card. Measurably less.",
+        "dinner_table_line": (
+            "Handing over cash physically hurts in a way tapping doesn't — "
+            "which is precisely why tapping exists."
+        ),
+        "emotion": "alarm",
+        "image_type": "photo",
+        "photo_keywords": "contactless card payment terminal",
+        "photo_subject": "card",
+    },
+    {
+        "id": "decoy_effect",
+        "category": "money",
+        "prompt": (
+            "The decoy: adding a deliberately poor third option makes the "
+            "target option look obviously correct. Classic in menus and pricing tiers."
+        ),
+        "universal_door": "A menu with one absurdly overpriced item nobody orders.",
+        "hook_seed": "That overpriced item on the menu isn't meant to be ordered.",
+        "dinner_table_line": (
+            "It exists to make the second-most-expensive thing look reasonable — "
+            "and you ordered it, didn't you."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
+    {
+        "id": "casinos_no_clocks",
+        "category": "money",
+        "prompt": (
+            "Environment design for time distortion: no clocks, no windows, "
+            "constant light and sound remove every cue for how long you've been there."
+        ),
+        "universal_door": "Losing track of time indoors somewhere with no windows.",
+        "hook_seed": "Casinos have no clocks and no windows. Nothing there is accidental.",
+        "dinner_table_line": (
+            "Every cue you use to sense passing time has been deliberately "
+            "removed from the room."
+        ),
+        "emotion": "alarm",
+        "image_type": "diagram",
+    },
+    {
+        "id": "free_shipping",
+        "category": "money",
+        "prompt": (
+            "Zero-price effect: free is processed categorically differently from "
+            "cheap, so free shipping outperforms a larger discount."
+        ),
+        "universal_door": "Adding items to a cart to unlock free delivery.",
+        "hook_seed": "You spent more to avoid a delivery fee. Everyone does.",
+        "dinner_table_line": (
+            "Free isn't a low price — it's a different category in your head, "
+            "and people reliably spend more money to reach it."
+        ),
+        "emotion": "wrong",
+        "image_type": "diagram",
+    },
 
-    # --- culture & traditions (historical/comparative, never doctrinal) ---
-    {"id": "flood_myths", "category": "culture", "prompt": "why so many unrelated cultures across history have their own version of a great-flood myth, looked at as comparative history, not as a claim about which is true", "image_type": "diagram"},
-    {"id": "fasting_traditions", "category": "culture", "prompt": "the history behind fasting traditions across different cultures and calendars, told purely as historical/comparative fact, not doctrine", "image_type": "diagram"},
-    {"id": "lunar_vs_solar_calendars", "category": "culture", "prompt": "why lunar and solar calendars drift apart, and why that's the reason some holidays 'move' every year while others don't", "image_type": "diagram"},
-    {"id": "new_years_traditions", "category": "culture", "prompt": "how different cultures and calendars around the world mark the start of a new year", "image_type": "photo", "photo_keywords": "new year celebration fireworks crowd", "photo_subject": "fireworks"},
-    {"id": "why_rituals_exist", "category": "culture", "prompt": "the psychological function of ritual: why humans across virtually every culture perform repeated symbolic actions", "image_type": "diagram"},
-
-    # --- animals & nature ---
-    {"id": "cats_purr", "category": "animals", "prompt": "why cats purr, a behavior that's still not fully explained by science", "image_type": "photo", "photo_keywords": "cat purring closeup", "photo_subject": "cat"},
-    {"id": "animal_migration", "category": "animals", "prompt": "how animals like birds and whales navigate thousands of miles without getting lost", "image_type": "photo", "photo_keywords": "birds flying migration formation", "photo_subject": "bird"},
-    {"id": "dogs_tilt_heads", "category": "animals", "prompt": "why dogs tilt their heads when you talk to them", "image_type": "photo", "photo_keywords": "dog tilting head", "photo_subject": "dog"},
-    {"id": "bioluminescence", "category": "animals", "prompt": "bioluminescence: how and why some creatures generate their own light", "image_type": "photo", "photo_keywords": "jellyfish glowing ocean", "photo_subject": "jellyfish"},
-    {"id": "zebra_stripes", "category": "animals", "prompt": "why zebras have stripes: the leading scientific theories, and why the debate isn't fully settled", "image_type": "photo", "photo_keywords": "zebra stripes closeup", "photo_subject": "zebra"},
-
-    # --- money & everyday economics ---
-    {"id": "charm_pricing", "category": "money", "prompt": "charm pricing: why $9.99 feels so much cheaper than $10, even though the difference is a single cent", "image_type": "diagram"},
-    {"id": "how_inflation_works", "category": "money", "prompt": "how inflation actually works, in plain terms, without the jargon", "image_type": "diagram"},
-    {"id": "airline_dynamic_pricing", "category": "money", "prompt": "why airline ticket prices swing so much for the same seat, sometimes within the same hour", "image_type": "diagram"},
-    {"id": "opportunity_cost", "category": "money", "prompt": "opportunity cost: the hidden cost of whatever you didn't choose, and why it's easy to ignore", "image_type": "diagram"},
-    {"id": "credit_scores", "category": "money", "prompt": "where credit scores came from and what they're actually measuring", "image_type": "diagram"},
-
-    # --- language & words ---
-    {"id": "ok_origin", "category": "language", "prompt": "the surprisingly disputed origin of 'OK', and how it became one of the most universally understood words on Earth", "image_type": "diagram"},
-    {"id": "loanwords", "category": "language", "prompt": "loanwords: how words like 'kindergarten' or 'pajamas' cross from one language into another and just stay", "image_type": "diagram"},
-    {"id": "untranslatable_words", "category": "language", "prompt": "words that exist in some languages with no direct English equivalent, and what that says about how language shapes thought", "image_type": "diagram"},
-    {"id": "english_spelling_mess", "category": "language", "prompt": "why English spelling is so inconsistent, a side effect of borrowing words from dozens of other languages over centuries", "image_type": "diagram"},
-    {"id": "false_friends", "category": "language", "prompt": "'false friends': words that look nearly identical across two languages but mean something completely different", "image_type": "diagram"},
-
-    # --- sports ---
-    {"id": "offside_rule", "category": "sports", "prompt": "why soccer's offside rule exists, and what problem it was actually designed to solve", "image_type": "diagram"},
-    {"id": "curveball_physics", "category": "sports", "prompt": "the physics of a curveball: how spinning a ball makes it bend through the air", "image_type": "diagram"},
-    {"id": "tennis_tiebreak", "category": "sports", "prompt": "why the tennis tiebreak was invented, and the endless matches it was created to prevent", "image_type": "diagram"},
-    {"id": "choking_under_pressure", "category": "sports", "prompt": "the psychology of 'choking' under pressure: why skilled athletes sometimes fail at the exact moment it matters most", "image_type": "diagram"},
-    {"id": "marathon_distance", "category": "sports", "prompt": "why a marathon is exactly 26.2 miles, an oddly specific number with a surprisingly royal backstory", "image_type": "diagram"},
-
-    # --- movies & entertainment ---
-    {"id": "why_24fps", "category": "movies", "prompt": "why movies settled on 24 frames per second, a technical decision from decades ago that stuck", "image_type": "diagram"},
-    {"id": "foley_sound", "category": "movies", "prompt": "foley sound: how fake, hand-made sound effects end up sounding more realistic than the real thing", "image_type": "diagram"},
-    {"id": "laugh_track_history", "category": "movies", "prompt": "the history of the sitcom laugh track, and the psychology of why it actually makes things feel funnier", "image_type": "diagram"},
-    {"id": "green_screen", "category": "movies", "prompt": "how green screen compositing actually works, and why the color green specifically was chosen", "image_type": "diagram"},
-
-    # --- music ---
-    {"id": "minor_key_sadness", "category": "music", "prompt": "why songs in a minor key sound sad, the music theory behind an emotion most people can hear but not explain", "image_type": "diagram"},
-    {"id": "earworms", "category": "music", "prompt": "earworms: why certain songs get stuck on repeat in your head for hours", "image_type": "diagram"},
-    {"id": "music_chills", "category": "music", "prompt": "why some music gives people literal chills or goosebumps, a neuroscience phenomenon called frisson", "image_type": "diagram"},
-    {"id": "autotune_history", "category": "music", "prompt": "how autotune went from an invisible pitch-correction tool to a deliberate, recognizable sound of its own", "image_type": "diagram"},
+    # ------------------------------------------------------------ HISTORY
+    # Only origins attached to something the reader touches daily.
+    {
+        "id": "sixty_seconds",
+        "category": "history",
+        "prompt": (
+            "Babylonian base-60 mathematics survives in clocks and angles "
+            "because 60 divides cleanly by so many numbers."
+        ),
+        "universal_door": "Every clock you have ever read.",
+        "hook_seed": "Your clock runs on a number system 4,000 years old.",
+        "dinner_table_line": (
+            "We count time in sixties because the Babylonians did — "
+            "it's the oldest thing you use every single day."
+        ),
+        "emotion": "awe",
+        "image_type": "photo",
+        "photo_keywords": "analog clock face",
+        "photo_subject": "clock",
+    },
+    {
+        "id": "qwerty",
+        "category": "history",
+        "prompt": (
+            "QWERTY's layout emerged from typewriter mechanics and telegraph "
+            "usage, then locked in through training and network effects."
+        ),
+        "universal_door": "The keyboard you're reading this on.",
+        "hook_seed": "Your keyboard layout was designed for a machine you've never used.",
+        "dinner_table_line": (
+            "The layout solved a jamming problem in 1870s typewriters, and "
+            "we've been stuck with it ever since because everyone learned it."
+        ),
+        "emotion": "wrong",
+        "image_type": "photo",
+        "photo_keywords": "vintage typewriter keys",
+        "photo_subject": "typewriter",
+    },
+    {
+        "id": "driving_sides",
+        "category": "history",
+        "prompt": (
+            "Left-versus-right driving traces to mounted travel and sword hands, "
+            "then to wagon design and Napoleonic and colonial spread."
+        ),
+        "universal_door": "Which side of the road your country drives on.",
+        "hook_seed": "Which side you drive on was decided by sword hands.",
+        "dinner_table_line": (
+            "Riders kept left so their sword arm faced oncoming strangers — "
+            "half the world still drives on that decision."
+        ),
+        "emotion": "awe",
+        "image_type": "photo",
+        "photo_keywords": "road traffic highway cars",
+        "photo_subject": "road",
+    },
+    {
+        "id": "hello_telephone",
+        "category": "history",
+        "prompt": (
+            "'Hello' as a telephone greeting was popularised by early telephone "
+            "practice; Bell preferred 'ahoy'. The greeting spread from the device."
+        ),
+        "universal_door": "Saying hello when you answer a call.",
+        "hook_seed": "'Hello' barely existed as a greeting before the telephone.",
+        "dinner_table_line": (
+            "We greet each other with a word that a machine taught us — "
+            "and Bell wanted us to say 'ahoy' instead."
+        ),
+        "emotion": "amusement",
+        "image_type": "photo",
+        "photo_keywords": "antique rotary telephone",
+        "photo_subject": "telephone",
+    },
+    {
+        "id": "ring_finger",
+        "category": "history",
+        "prompt": (
+            "The fourth-finger tradition rests on an ancient belief in a vein "
+            "running to the heart — anatomically wrong, culturally permanent. "
+            "Hedge the origin appropriately."
+        ),
+        "universal_door": "Wedding rings, on the same finger, across most of the world.",
+        "hook_seed": "The ring finger was chosen for a reason that isn't true.",
+        "dinner_table_line": (
+            "The tradition rests on a vein to the heart that doesn't exist — "
+            "and we've all just kept doing it anyway."
+        ),
+        "emotion": "amusement",
+        "image_type": "photo",
+        "photo_keywords": "wedding ring hand",
+        "photo_subject": "ring",
+    },
+    {
+        "id": "two_day_weekend",
+        "category": "history",
+        "prompt": (
+            "The two-day weekend came from industrial scheduling and competing "
+            "religious rest days, then spread through labour organising and "
+            "Ford's five-day week."
+        ),
+        "universal_door": "Having Saturday and Sunday off.",
+        "hook_seed": "The weekend is about a century old. Someone had to win it.",
+        "dinner_table_line": (
+            "Two days off isn't natural or ancient — it was fought for, "
+            "and it's younger than the light bulb."
+        ),
+        "emotion": "awe",
+        "image_type": "diagram",
+    },
 ]
 
-_BY_ID = {t["id"]: t for t in TOPICS}
+
+# --------------------------------------------------------------------------
+# Compatibility helpers
+# --------------------------------------------------------------------------
+
+CATEGORIES = sorted({t["category"] for t in TOPICS})
+
+# Emotion rotation supports variable reward: avoid repeating the same emotional
+# flavour back to back. Consumed by generate.py alongside category rotation.
+EMOTIONS = ["surprise", "amusement", "alarm", "awe", "wrong"]
+
+
+def get_topic(topic_id: str) -> dict | None:
+    """Look up a topic by id."""
+    return next((t for t in TOPICS if t["id"] == topic_id), None)
+
+
+def last_emotion(recent: list[dict]) -> str | None:
+    """Emotion of the most recent posted entry, if any."""
+    for entry in recent:
+        if entry.get("status") == "posted":
+            t = get_topic(entry.get("topic_id", ""))
+            if t:
+                return t.get("emotion")
+    return None
 
 
 def pick_next_topic(recent_history: list[dict], exclude_ids: set = frozenset()) -> dict:
@@ -162,6 +1051,21 @@ def pick_next_topic(recent_history: list[dict], exclude_ids: set = frozenset()) 
         eligible_categories = all_categories
         exclude_ids = frozenset()
 
+    # Categories have uneven topic counts (6 to 9). Round-robining categories
+    # without regard to size lets a small category (e.g. 6 topics) exhaust and
+    # restart internally before larger categories finish their first pass,
+    # producing a repeat before one full lap across the whole bank completes.
+    # Prefer categories that still have an unused topic in the current lap —
+    # same defensive shape as the exclusion fallbacks above: only narrow the
+    # pool if doing so doesn't empty it, i.e. don't apply this once every
+    # category has genuinely cycled and a new lap is starting.
+    def has_unused(cat):
+        return any(t["id"] not in used_ids for t in available_in(cat))
+
+    categories_with_unused = [c for c in eligible_categories if has_unused(c)]
+    if categories_with_unused:
+        eligible_categories = categories_with_unused
+
     # Pick randomly among whichever categories are tied for "least recently
     # used" — with an empty or symmetric history every category ties, and a
     # stable sort would deterministically favor the same one (alphabetically
@@ -174,6 +1078,19 @@ def pick_next_topic(recent_history: list[dict], exclude_ids: set = frozenset()) 
     if not candidates:
         candidates = category_topics  # every topic in this category has cycled — start over
 
+    # Avoid repeating the same emotional flavour back to back (variable
+    # reward) — but never let this filter empty the candidate set. Same
+    # defensive shape as the category exclusion above. This has to happen
+    # before the recency tie-break below, not after: filtering the already-
+    # narrow tied-for-least-recent set leaves it too small to have room to
+    # exclude anything most of the time. Filtering the full candidate pool
+    # first gives it real effect while still respecting recency afterward.
+    last_emo = last_emotion(recent_history)
+    if last_emo is not None:
+        emotion_filtered = [t for t in candidates if t.get("emotion") != last_emo]
+        if emotion_filtered:
+            candidates = emotion_filtered
+
     def topic_last_used_index(topic):
         for i, h in enumerate(recent_history):
             if h["topic_id"] == topic["id"]:
@@ -183,8 +1100,61 @@ def pick_next_topic(recent_history: list[dict], exclude_ids: set = frozenset()) 
     # Same tie-breaking fix at the topic level.
     best_topic_recency = max(topic_last_used_index(t) for t in candidates)
     tied = [t for t in candidates if topic_last_used_index(t) == best_topic_recency]
+
     return random.choice(tied)
 
 
-def get_topic(topic_id: str) -> dict:
-    return _BY_ID[topic_id]
+def validate_bank() -> list[str]:
+    """
+    Self-check the bank. Run in CI or at startup — a malformed topic should
+    fail loudly rather than produce a bad post at 9am.
+    """
+    problems: list[str] = []
+    seen: set[str] = set()
+
+    required = (
+        "id", "category", "prompt", "universal_door",
+        "hook_seed", "dinner_table_line", "emotion", "image_type",
+    )
+
+    for t in TOPICS:
+        tid = t.get("id", "<missing id>")
+
+        for field in required:
+            if not t.get(field):
+                problems.append(f"{tid}: missing required field '{field}'")
+
+        if tid in seen:
+            problems.append(f"{tid}: duplicate id")
+        seen.add(tid)
+
+        if t.get("emotion") not in EMOTIONS:
+            problems.append(f"{tid}: unknown emotion {t.get('emotion')!r}")
+
+        if t.get("image_type") == "photo":
+            if not t.get("photo_keywords") or not t.get("photo_subject"):
+                problems.append(f"{tid}: photo topic missing keywords/subject")
+        elif t.get("image_type") != "diagram":
+            problems.append(f"{tid}: image_type must be 'diagram' or 'photo'")
+
+        # The hook is the whole product. Enforce the effort budget here.
+        seed = t.get("hook_seed", "")
+        if len(seed.split()) > 14:
+            problems.append(f"{tid}: hook_seed too long ({len(seed.split())} words)")
+
+    return problems
+
+
+if __name__ == "__main__":
+    issues = validate_bank()
+    print(f"{len(TOPICS)} topics across {len(CATEGORIES)} categories: {CATEGORIES}")
+    from collections import Counter
+    print("by category:", dict(Counter(t["category"] for t in TOPICS)))
+    print("by emotion: ", dict(Counter(t["emotion"] for t in TOPICS)))
+    print("by image:   ", dict(Counter(t["image_type"] for t in TOPICS)))
+    if issues:
+        print("\nPROBLEMS:")
+        for p in issues:
+            print("  -", p)
+    else:
+        print("\nBank OK.")

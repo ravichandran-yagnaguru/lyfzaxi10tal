@@ -2,6 +2,8 @@ import os
 
 from dotenv import load_dotenv
 
+import topics
+
 load_dotenv()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
@@ -26,7 +28,15 @@ CLOUD_RUN_URL = os.getenv("CLOUD_RUN_URL")
 SCHEDULER_SERVICE_ACCOUNT_EMAIL = os.getenv("SCHEDULER_SERVICE_ACCOUNT_EMAIL")
 
 MAX_GENERATION_ATTEMPTS = 3
-RECENT_HISTORY_WINDOW = 7
+
+# pick_next_topic()'s no-repeat-within-a-cycle guarantee can only see back as
+# far as this window. It must be at least the bank size or a topic can
+# legally repeat before the bank has cycled once (review.py's
+# check_history_window_vs_bank — a 7-post window against a 54-topic bank
+# meant a repeat could happen in under two days). Tied to the bank size with
+# 2x headroom, matching test_topics.py's own margin, so this can't silently
+# drift out of sync as topics.TOPICS grows or shrinks.
+RECENT_HISTORY_WINDOW = len(topics.TOPICS) * 2
 
 # Scheduled slots are hours apart, but two triggers can legitimately land
 # minutes apart (a manual trigger near a scheduled time, or a scheduler retry
