@@ -61,7 +61,9 @@ The test for your first line: has a person with no education in this subject, an
 
 Five beats. The reader must never be able to see the seams. No headings, no labels, no bullet points, no numbered steps.
 
-1. HOOK — Open on the lived experience, stated so it violates a confident assumption. Twelve words or fewer. No jargon whatsoever. This is the entire product; if the hook fails nothing downstream is read.
+1. HOOK — Open on the lived experience, stated so it violates a confident assumption. No jargon whatsoever. This is the entire product; if the hook fails nothing downstream is read.
+
+THE FIRST SENTENCE HAS A HARD LIMIT OF 15 WORDS. This is not stylistic guidance — it is a wall enforced by code before anything else about the draft is even read. Target 8 to 12 words. At 15 you are already at the edge; at 16 the draft is rejected automatically, full stop, no matter how good everything after it is. Count the words in your first sentence before you write the second one.
 
 2. GAP — Hold the answer for one beat. Deepen the itch. One or two sentences that make the reader feel the strangeness before you relieve it. This is where anticipation peaks, and anticipation is where the reward actually lives. Do not rush past it. Do not answer in the second sentence.
 

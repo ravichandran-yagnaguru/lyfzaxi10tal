@@ -231,3 +231,50 @@ def build_retry_hint(scores: dict) -> str:
         f"\nDirection: {fix}"
         "\nDo not simply reword the last attempt. Re-enter through the Door differently."
     )
+
+
+_OPENING_LINE_PATTERN = re.compile(r"opening line is (\d+) words \(max (\d+)\)")
+
+
+def build_rule_retry_hint(reasons: list[str]) -> str:
+    """
+    Feed deterministic rule-based violations back into the next generation
+    attempt, in the same shape as build_retry_hint.
+
+    Rule-based rejections happen before any critic call, so there's no
+    weakest_link/fix to draw on -- without this, a rule-based failure fed the
+    generator nothing on retry, and it reproduced the identical violation.
+    Production logs showed exactly this: three consecutive attempts failing
+    on opening-line length (16, 16, 19 words) with no improvement between
+    them, because the retry was blind to why the previous one was rejected.
+    """
+    if not reasons:
+        return ""
+
+    directions: list[str] = []
+    for reason in reasons:
+        m = _OPENING_LINE_PATTERN.search(reason)
+        if m:
+            words, limit = m.group(1), m.group(2)
+            directions.append(
+                f"the opening line was {words} words. The hard limit is {limit} and the "
+                "target is 12 or fewer. Cut the first sentence to a short, punchy line. "
+                "Do not simply reword — shorten."
+            )
+        elif "does not end on terminal punctuation" in reason:
+            directions.append("the draft was cut off mid-sentence. Finish the thought and end cleanly.")
+        elif "visible section label" in reason or "markdown header" in reason:
+            directions.append(
+                "the draft had visible structure (a label or header). Write plain prose -- "
+                "no labels, no headers, no bullets."
+            )
+        elif "bullet-point" in reason:
+            directions.append("the draft used bullet points. Write plain prose with no bullets.")
+        elif reason.startswith("too short"):
+            directions.append(f"{reason}. Develop the GAP and SNAP beats more fully.")
+        elif reason.startswith("too long"):
+            directions.append(f"{reason}. Trim it down.")
+        else:
+            directions.append(reason)
+
+    return "\n\nA previous attempt was rejected: " + " ".join(directions)

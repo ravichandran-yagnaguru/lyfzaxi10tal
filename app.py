@@ -23,7 +23,7 @@ import state
 import topics
 import validate
 from images import ImageSourcingError
-from validate_prompt import build_retry_hint
+from validate_prompt import build_retry_hint, build_rule_retry_hint
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("concept-bot")
@@ -76,7 +76,11 @@ def run_pipeline(dry_run: bool) -> dict:
         state.record_draft(topic["id"], topic["category"], passed, reasons, scores)
         if not passed:
             failure_reasons = reasons
-            retry_hint = build_retry_hint(scores) if scores else ""
+            # Never leave this empty on a failure -- an empty hint means the
+            # next attempt sees an identical prompt and reproduces the same
+            # violation. scores is None for a rule-based rejection (no critic
+            # call was made), so fall back to the deterministic reasons.
+            retry_hint = build_retry_hint(scores) if scores else build_rule_retry_hint(reasons)
             logger.info("Draft failed validation: %s", reasons)
             continue
 
