@@ -10,6 +10,7 @@ gift_checks, parse_critic_response) are imported rather than duplicated.
 from __future__ import annotations
 
 import json
+import random
 
 import anthropic
 
@@ -23,16 +24,6 @@ from validate_prompt import parse_critic_response
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3)
 
-# Era per idiom for the engraving-style image prompt. idiom_topics.py doesn't
-# store era separately from the scene description (see generate_for_topic's
-# docstring) — this mapping mirrors the values the pilot images were
-# generated with. New idioms without an entry fall back to 19th century.
-IDIOM_ERAS = {
-    "bite_the_bullet": "18th",
-    "break_the_ice": "19th",
-    "caught_red_handed": "15th",
-}
-
 
 def pick_next_idiom(recent_history: list[dict], exclude_ids: set = frozenset()) -> dict | None:
     """
@@ -40,15 +31,13 @@ def pick_next_idiom(recent_history: list[dict], exclude_ids: set = frozenset()) 
     post_history the everyday-mystery picker reads; idiom entries are the ones
     whose topic_id is in the idiom bank (ids don't collide with topics.py).
 
-    Only "solid"/"contested"-confidence idioms are eligible (validate_idiom_bank
-    enforces that "unknown" never even loads). Prefers never-posted idioms in
-    bank order; once all have posted, returns the least recently posted.
-    Returns None only if every idiom is excluded.
+    All confidence tiers are eligible — folklore idioms post too, framed
+    honestly (see idiom_prompt). Picks randomly among never-posted idioms
+    (random, not bank order — the same deterministic-order lesson as
+    topics.pick_next_topic); once all have posted, returns the least
+    recently posted. Returns None only if every idiom is excluded.
     """
-    eligible = [
-        t for t in IDIOM_TOPICS
-        if t["confidence"] in ("solid", "contested") and t["id"] not in exclude_ids
-    ]
+    eligible = [t for t in IDIOM_TOPICS if t["id"] not in exclude_ids]
     if not eligible:
         return None
 
@@ -62,7 +51,7 @@ def pick_next_idiom(recent_history: list[dict], exclude_ids: set = frozenset()) 
 
     never_used = [t for t in eligible if last_used_index(t) == -1]
     if never_used:
-        return never_used[0]
+        return random.choice(never_used)
     return max(eligible, key=last_used_index)
 
 
@@ -133,9 +122,22 @@ def validate_idiom_draft(draft: str, topic: dict) -> tuple[bool, list[str], dict
 
 
 def source_idiom_image(topic: dict) -> str:
-    """Generate the engraving-style illustration for this idiom. Returns the
-    local file path. Raises idiom_images.IdiomImageError on any failure —
-    the caller ships the post text-only in that case (deliberately different
-    from the five-beat pipeline, where image failure skips/re-picks)."""
-    era = IDIOM_ERAS.get(topic["id"], "19th")
-    return idiom_images.generate_idiom_image(topic["id"], era, topic["image_style"])
+    """Generate the engraving-style illustration for this idiom, then verify
+    it actually depicts the bank's scene (a cheap Haiku vision check — Gemini
+    occasionally drifts off-prompt, and an off-topic image under a history
+    post costs credibility). One regeneration attempt if the first image
+    fails relevance; after that, raise. Raises idiom_images.IdiomImageError
+    on any failure — the caller ships the post text-only in that case
+    (deliberately different from the five-beat pipeline, where image failure
+    skips/re-picks)."""
+    era = topic.get("era", "19th")
+    last_reason = ""
+    for attempt in range(2):
+        path = idiom_images.generate_idiom_image(topic["id"], era, topic["image_style"])
+        relevant, reason = idiom_images.check_image_relevance(path, topic["image_style"])
+        if relevant:
+            return path
+        last_reason = reason
+    raise idiom_images.IdiomImageError(
+        f"generated image failed relevance check twice: {last_reason}"
+    )

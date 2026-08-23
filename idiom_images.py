@@ -43,6 +43,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 
 import requests
 
@@ -129,14 +130,58 @@ def generate_idiom_image(idiom_id: str, era: str, scene: str) -> str:
     return out_path
 
 
-def generate_for_topic(topic: dict, era: str = "19th") -> str:
-    """
-    Convenience wrapper taking an idiom_topics.py entry directly.
-    Pass the era explicitly per-idiom (bite_the_bullet=18th,
-    break_the_ice=19th, caught_red_handed=15th) since the bank doesn't
-    currently store it separately from the scene description.
-    """
-    return generate_idiom_image(topic["id"], era, topic["image_style"])
+def generate_for_topic(topic: dict, era: str | None = None) -> str:
+    """Convenience wrapper taking an idiom_topics.py entry directly. Era
+    comes from the bank entry's `era` field (override via the parameter)."""
+    return generate_idiom_image(topic["id"], era or topic.get("era", "19th"), topic["image_style"])
+
+
+def check_image_relevance(path: str, scene: str) -> tuple[bool, str]:
+    """Cheap vision check: does the generated image actually depict the
+    bank's scene? Gemini occasionally drifts off-prompt, and an off-topic
+    image under a history post costs exactly the credibility this account
+    runs on. Uses the Haiku critic model with the image inline (~a tenth of
+    a cent per check). Returns (relevant, reason).
+
+    Judged loosely on purpose — an engraving interpretation never matches a
+    scene description word for word. Fail only when the image is about
+    something else entirely, or contradicts the scene's core elements."""
+    import anthropic
+
+    import llm_utils
+
+    with open(path, "rb") as f:
+        image_b64 = base64.standard_b64encode(f.read()).decode("ascii")
+
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3)
+    resp = client.messages.create(
+        model=config.CRITIC_MODEL,
+        max_tokens=300,
+        thinking={"type": "disabled"},
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
+                {"type": "text", "text": (
+                    "This illustration was generated for the following scene description:\n\n"
+                    f"{scene}\n\n"
+                    "Does the image broadly depict this scene? Judge loosely — artistic "
+                    "interpretation, missing minor details, and extra background elements "
+                    "are all fine. Answer NO only if the image shows something else "
+                    "entirely or contradicts the scene's core subject (wrong kind of "
+                    "people/place/action).\n\n"
+                    "Reply in EXACTLY this format, nothing else:\n"
+                    "RELEVANT: YES or NO\n"
+                    "REASON: one short sentence"
+                )},
+            ],
+        }],
+    )
+    text = llm_utils.extract_text(resp)
+    relevant = bool(re.search(r"RELEVANT:\s*YES", text, re.IGNORECASE))
+    reason_match = re.search(r"REASON:\s*(.*)", text, re.IGNORECASE)
+    reason = reason_match.group(1).strip() if reason_match else text[:200]
+    return relevant, reason
 
 
 if __name__ == "__main__":
@@ -147,11 +192,17 @@ if __name__ == "__main__":
     sys.path.insert(0, ".")
     from idiom_topics import IDIOM_TOPICS
 
-    eras = {"bite_the_bullet": "18th", "break_the_ice": "19th", "caught_red_handed": "15th"}
+    # Full-bank smoke tests cost one Gemini image per idiom -- pass ids to
+    # test specific entries, or --first-3 for a quick spot check.
+    ids = [a for a in sys.argv[1:] if not a.startswith("-")]
+    to_test = [t for t in IDIOM_TOPICS if not ids or t["id"] in ids]
+    if "--first-3" in sys.argv:
+        to_test = to_test[:3]
 
-    for topic in IDIOM_TOPICS:
+    for topic in to_test:
         try:
-            path = generate_for_topic(topic, era=eras.get(topic["id"], "19th"))
-            print(f"OK  {topic['id']} -> {path}")
+            path = generate_for_topic(topic)
+            relevant, reason = check_image_relevance(path, topic["image_style"])
+            print(f"OK  {topic['id']} -> {path}  relevance={'PASS' if relevant else 'FAIL'} ({reason})")
         except IdiomImageError as e:
             print(f"FAIL {topic['id']}: {e}")

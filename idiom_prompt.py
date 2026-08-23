@@ -40,7 +40,12 @@ No headings, no labels, no bullets. The seams must not show.
 
 # The accuracy rule — this outranks everything else
 
-You will be given VERIFIED ORIGIN: the documented truth. Your story must not contradict it, and must not invent details beyond it — no added names, dates, places, or numbers that aren't in the material you're given. If the material marks the origin as contested, hedge it naturally ("the earliest record we have...", "as far as anyone can tell...").
+You will be given VERIFIED ORIGIN: what is actually documented. Your story must not contradict it, and must not invent details beyond it — no added names, dates, places, or numbers that aren't in the material you're given.
+
+You will also be given a CONFIDENCE level, and it changes how you tell the story:
+- solid: the origin is documented. Tell it straight, as fact.
+- contested: real evidence exists but the link is unproven. Hedge the uncertain part naturally ("the earliest record we have...", "the story most people point to...", "whether that's truly where it started, nobody has proven"). The honesty should feel like a friend leveling with you, not a disclaimer.
+- folklore: the origin is unknown. The famous story may be told ONLY as a story passed down — "the story people tell...", "as it's been handed down...", "told for centuries, proven never." Own the unknown; the mystery is part of the charm. Never dress the legend up as documented history.
 
 Never frame the post around a myth the reader supposedly believes. No "you probably think...", no "contrary to popular belief...", no "most people assume...". The reader doesn't need the wrong story named to enjoy the true one. Tell it straight.
 
@@ -65,12 +70,23 @@ def build_idiom_user_turn(topic: dict) -> str:
     the generator writes its own version hitting the same beats.
     verified_origin is the ground truth it must not contradict.
     """
-    hedge_line = ""
-    if topic.get("confidence") == "contested":
+    confidence = topic.get("confidence", "solid")
+    if confidence == "contested":
         hedge_line = (
-            "\n\nCONFIDENCE: contested — hedge the origin naturally "
-            '("the earliest record we have...", "as far as anyone can tell...").'
+            "\n\nCONFIDENCE: contested — hedge the unproven part naturally "
+            '("the earliest record we have...", "the story most people point to..."). '
+            "Tell the documented parts straight; be honest about where the trail thins."
         )
+    elif confidence == "folklore":
+        hedge_line = (
+            "\n\nCONFIDENCE: folklore — the origin is unknown. Tell the famous story "
+            'ONLY as a passed-down story ("the story people tell...", "told for '
+            'generations, proven never"). Include what IS known from the verified '
+            "origin (like when it first appeared in print). The honesty is the charm — "
+            "never present the legend as documented history."
+        )
+    else:
+        hedge_line = "\n\nCONFIDENCE: solid — the origin is documented. Tell it straight."
 
     return f"""Write today's idiom post.
 
@@ -114,15 +130,18 @@ IDIOM_CRITIC_SYSTEM_PROMPT = """You are a ruthless editor for an X account. This
 You check two hard gates first, then score two axes 1 to 10. Be harsh. A 7 means "fine." Reserve 9 and 10 for drafts you would genuinely expect strangers to share.
 
 # HARD GATE 1: HISTORICAL ACCURACY
-You will be given VERIFIED ORIGIN (the documented truth) and sometimes POPULAR MYTH (a widespread but wrong version).
+You will be given VERIFIED ORIGIN (what is actually documented), a CONFIDENCE level, and sometimes POPULAR MYTH (a widespread but wrong or unprovable version).
 
 Fail this gate if the draft:
 - contradicts any part of VERIFIED ORIGIN
-- reproduces the POPULAR MYTH, even partially, even as coloring
 - invents a name, date, place, number, or source not present in VERIFIED ORIGIN
-- states a contested origin as flat fact when the material says it should be hedged
+- (confidence: solid) reproduces the POPULAR MYTH, even partially, even as coloring
+- (confidence: contested) states the unproven part as flat, established fact — the documented parts may be told straight, but the disputed link must be hedged
+- (confidence: folklore) presents the legend as documented history. For folklore idioms the popular story MAY be retold — that is the point — but only clearly framed as a story passed down ("the story people tell...", "proven never"), and the draft must not claim documentation that doesn't exist. A folklore draft that honestly labels the legend as legend PASSES this gate.
 
-This gate exists because popular idiom folklore is unreliable — verification of the pilot batch found 2 of 5 idioms needed correction against the popular version. Accuracy is the single most important check in this format. When in doubt, fail it and say exactly which claim is the problem.
+The generator's story beat is drawn from the same bank entry as VERIFIED ORIGIN — vivid scene-setting consistent with the verified material (weather, posture, mood) is storytelling, not invention. Only fail on fabricated checkable specifics: names, dates, places, numbers, sources, or causal claims not in the material.
+
+This gate exists because popular idiom folklore is unreliable — verification of the pilot batch found 2 of 5 idioms needed correction against the popular version. Accuracy is the single most important check in this format. When in doubt about a checkable claim, fail it and say exactly which claim is the problem.
 
 # HARD GATE 2: NO CONDESCENSION
 Fail this gate if the draft implies the reader believed a myth or frames the post as a correction. That includes "you probably think...", "contrary to popular belief...", "most people assume...", "despite what you've heard...", "the real story is..." — and any subtler framing that positions the reader as previously wrong. The story must be told straight, as if no myth existed.

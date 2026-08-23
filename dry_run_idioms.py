@@ -17,7 +17,12 @@ from idiom_topics import IDIOM_TOPICS
 
 skip_images = "--skip-images" in sys.argv or not config.GEMINI_API_KEY
 
-for topic in IDIOM_TOPICS:
+# With a 30-idiom bank, a full run costs real money -- pass ids to test a
+# subset (python3 dry_run_idioms.py let_cat_out_bag paint_town_red).
+_ids = [a for a in sys.argv[1:] if not a.startswith("-")]
+_to_run = [t for t in IDIOM_TOPICS if not _ids or t["id"] in _ids]
+
+for topic in _to_run:
     print("=" * 72)
     print(f"IDIOM: {topic['idiom']}  ({topic['id']}, confidence={topic['confidence']})")
     print("=" * 72)
