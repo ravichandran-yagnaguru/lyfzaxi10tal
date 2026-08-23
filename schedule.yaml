@@ -14,6 +14,13 @@
 # Re-anchored Pacific -> Eastern: the English-language audience density sits
 # on ET, and peak windows are 8-10am, 12-2pm, 5-7pm ET. The two slots below
 # land in the morning and evening windows.
+#
+# NOTE: the idiom format has its own separate Cloud Scheduler job
+# (concept-bot-idiom-daily: 14:00 America/New_York daily, hitting
+# /post?format=idiom). It is NOT managed by this file or manage_schedule.py --
+# the sync script only touches jobs whose name contains "concept-bot-post",
+# so it will never delete or modify the idiom job. Change the idiom cadence
+# directly via gcloud.
 timezone: "America/New_York"
 weekly_schedule:
   monday:    ["09:00", "18:00"]

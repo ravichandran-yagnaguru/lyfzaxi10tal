@@ -17,11 +17,15 @@ from flask import Flask, jsonify, request
 
 import config
 import generate
+import idiom_generate
+import idiom_prompt
+import idiom_topics
 import images
 import poster
 import state
 import topics
 import validate
+from idiom_images import IdiomImageError
 from images import ImageSourcingError
 from validate_prompt import build_retry_hint, build_rule_retry_hint
 
@@ -34,6 +38,11 @@ _bank_issues = topics.validate_bank()
 if _bank_issues:
     logger.error("TOPIC_BANK_INVALID: %s", json.dumps(_bank_issues))
     raise RuntimeError(f"topics.py failed validate_bank(): {_bank_issues}")
+
+_idiom_bank_issues = idiom_topics.validate_idiom_bank()
+if _idiom_bank_issues:
+    logger.error("IDIOM_BANK_INVALID: %s", json.dumps(_idiom_bank_issues))
+    raise RuntimeError(f"idiom_topics.py failed validate_idiom_bank(): {_idiom_bank_issues}")
 
 
 def _opening_line(draft: str) -> str:
@@ -139,10 +148,118 @@ def run_pipeline(dry_run: bool) -> dict:
     return {"status": "skipped", "topic": topic["id"], "reasons": failure_reasons}
 
 
+def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
+    """Idiom-format counterpart of run_pipeline. Parallel by design — the
+    five-beat path above is untouched.
+
+    DELIBERATE DIFFERENCE from the five-beat pipeline: an image failure here
+    (Gemini refusal, quota, bad response) ships the post TEXT-ONLY instead of
+    skipping the slot or re-picking the topic. The origin story carries the
+    post; the engraving is a bonus.
+    """
+    recent = state.get_recent_history()
+
+    if not dry_run:
+        minutes_since = _minutes_since_last_post(recent)
+        if minutes_since is not None and minutes_since < config.MIN_MINUTES_BETWEEN_POSTS:
+            logger.info(
+                "Skipping idiom post: last successful post was %.1f min ago (< %d min guard).",
+                minutes_since, config.MIN_MINUTES_BETWEEN_POSTS,
+            )
+            return {"status": "skipped_duplicate_guard", "minutes_since_last_post": round(minutes_since, 1)}
+
+    if idiom_id:
+        topic = idiom_topics.get_idiom(idiom_id)
+        if topic is None:
+            return {"status": "error", "reason": f"unknown idiom_id {idiom_id!r}"}
+    else:
+        topic = idiom_generate.pick_next_idiom(recent)
+        if topic is None:
+            return {"status": "error", "reason": "no eligible idiom in the bank"}
+
+    failure_reasons: list[str] = []
+    retry_hint = ""
+
+    for attempt in range(1, config.MAX_GENERATION_ATTEMPTS + 1):
+        logger.info("Idiom attempt %d/%d for '%s'", attempt, config.MAX_GENERATION_ATTEMPTS, topic["id"])
+
+        draft = idiom_generate.generate_idiom_draft(topic, retry_hint)
+        passed, reasons, scores = idiom_generate.validate_idiom_draft(draft, topic)
+        state.record_draft(
+            topic["id"], "idiom", passed, reasons, None,
+            fmt="idiom",
+            score_fields=idiom_prompt.log_fields(scores, passed, reasons) if scores else None,
+        )
+        if not passed:
+            failure_reasons = reasons
+            retry_hint = idiom_prompt.build_retry_hint(scores) if scores else build_rule_retry_hint(reasons)
+            logger.info("Idiom draft failed validation: %s", reasons)
+            continue
+
+        # Image failure -> text-only post, never a skipped slot (see docstring).
+        image_path: str | None = None
+        image_error = ""
+        try:
+            image_path = idiom_generate.source_idiom_image(topic)
+        except IdiomImageError as e:
+            image_error = str(e)
+            logger.warning("Idiom image failed, shipping text-only: %s", e)
+
+        opening_line = _opening_line(draft)
+
+        if dry_run:
+            return {
+                "status": "dry_run",
+                "format": "idiom",
+                "topic": topic["id"],
+                "text": draft,
+                "image_path": image_path,
+                "image_error": image_error,
+                "critic_scores": idiom_prompt.log_fields(scores, passed, reasons) if scores else None,
+            }
+
+        tweet_id = poster.post(draft, image_path)
+        state.record_post(
+            {
+                "topic_id": topic["id"],
+                "category": "idiom",
+                "format": "idiom",
+                "status": "posted",
+                "tweet_id": tweet_id,
+                "image_source": "gemini-illustration" if image_path else "none",
+                "attribution": "",
+                "opening_line": opening_line,
+            }
+        )
+        logger.info("Posted idiom tweet %s for '%s'", tweet_id, topic["id"])
+        return {"status": "posted", "format": "idiom", "tweet_id": tweet_id, "topic": topic["id"],
+                "text_only": image_path is None}
+
+    logger.error(
+        "POST_SKIPPED: %s",
+        json.dumps({"format": "idiom", "topic": topic["id"], "reasons": failure_reasons}),
+    )
+    if not dry_run:
+        state.record_post(
+            {
+                "topic_id": topic["id"],
+                "category": "idiom",
+                "format": "idiom",
+                "status": "skipped",
+                "reasons": failure_reasons,
+            }
+        )
+    return {"status": "skipped", "format": "idiom", "topic": topic["id"], "reasons": failure_reasons}
+
+
 @app.route("/post", methods=["GET", "POST"])
 def post_endpoint():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
-    result = run_pipeline(dry_run)
+    fmt = request.args.get("format", "everyday")
+    if fmt == "idiom":
+        result = run_idiom_pipeline(dry_run, idiom_id=request.args.get("idiom_id"))
+    else:
+        result = run_pipeline(dry_run)
     return jsonify(result), 200
 
 

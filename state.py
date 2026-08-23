@@ -71,7 +71,15 @@ def record_post(entry: dict) -> None:
     _save_local(_LOCAL_STATE_FILE, entries)
 
 
-def record_draft(topic_id: str, category: str, passed: bool, reasons: list[str], scores: dict | None) -> None:
+def record_draft(
+    topic_id: str,
+    category: str,
+    passed: bool,
+    reasons: list[str],
+    scores: dict | None,
+    fmt: str = "everyday",
+    score_fields: dict | None = None,
+) -> None:
     """Persist every generation attempt, including rejected drafts, which
     previously weren't recorded at all. This is the dataset that makes it
     possible to check whether critic scores predict real engagement, and
@@ -80,15 +88,23 @@ def record_draft(topic_id: str, category: str, passed: bool, reasons: list[str],
 
     `scores` is None when the draft was rejected by the rule-based layer
     before any critic call was made.
+
+    `fmt` tags the content format ("everyday" | "idiom") so the two formats'
+    performance can be separated in analysis. `score_fields` lets a format
+    with different critic axes (idiom_prompt.log_fields) pass its own
+    pre-flattened fields; when omitted, the five-beat log_fields applies.
     """
     entry = {
         "topic_id": topic_id,
         "category": category,
+        "format": fmt,
         "passed": passed,
         "reasons": reasons,
         "date": datetime.now(timezone.utc).isoformat(),
     }
-    if scores is not None:
+    if score_fields is not None:
+        entry.update(score_fields)
+    elif scores is not None:
         entry.update(log_fields(scores, passed, reasons))
 
     if _use_firestore():

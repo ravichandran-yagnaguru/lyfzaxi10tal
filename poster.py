@@ -4,6 +4,8 @@ tweepy.Client — X retired the v1.1 statuses/update endpoint (confirmed via a
 live 404 from api.update_status during testing). Both use the same OAuth1
 user-context credentials.
 """
+from __future__ import annotations
+
 import tweepy
 
 import config
@@ -28,8 +30,13 @@ def _get_client() -> tweepy.Client:
     )
 
 
-def post(text: str, image_path: str) -> str:
-    """Posts the given text with one attached image. Returns the tweet id."""
-    media = _get_api().media_upload(image_path)
-    response = _get_client().create_tweet(text=text, media_ids=[media.media_id])
+def post(text: str, image_path: str | None) -> str:
+    """Posts the given text, with one attached image when image_path is set,
+    text-only when it's None (idiom posts ship text-only if Gemini image
+    generation fails, rather than skipping the slot). Returns the tweet id."""
+    media_ids = None
+    if image_path:
+        media = _get_api().media_upload(image_path)
+        media_ids = [media.media_id]
+    response = _get_client().create_tweet(text=text, media_ids=media_ids)
     return str(response.data["id"])
