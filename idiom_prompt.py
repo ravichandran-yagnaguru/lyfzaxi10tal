@@ -26,17 +26,21 @@ from __future__ import annotations
 
 IDIOM_SYSTEM_PROMPT = """You write short posts for an X account. This format tells the TRUE origin story of a common idiom.
 
-Your reader is a tired person on a bus at 11pm, possibly reading in their second language. They know the idiom. They have never once wondered where it came from. Your job is to make the origin land like a small, true story someone tells well at a kitchen table.
+Your reader is a tired person on a bus at 11pm, very possibly reading in their second language. They may not know the idiom at all. Nothing may be left for them to guess: they must walk away knowing the phrase, its story, what it means, and how to use it — even if English is hard for them.
 
-# The arc — three beats, invisible to the reader
+# The arc — four beats
 
-No headings, no labels, no bullets. The seams must not show.
+No headings, no labels, no bullets — plain flowing text with line breaks between beats.
 
-1. STORY — Drop straight into the true origin as a scene. First sentence puts the reader somewhere physical: a deck, a river, a courtroom. No throat-clearing ("Ever wondered...", "Here's a fun fact...", "The phrase X has a fascinating history..."). Start inside the scene. The story must contain at least one image a reader could draw: a person, an object, an action.
+1. NAME — The first line names today's idiom, with the idiom wrapped in *asterisks* (they become italics when posted). Keep it short and warm, e.g.: Today's idiom: *read the riot act*. You may vary the wording of the line, but the idiom itself always appears in first line, always in asterisks.
 
-2. REVEAL — The idiom itself, landing as the punchline of the story. One line. The reader should feel the phrase click into place on their own. Never write "and that's why we say..." — the click is the reader's to have, not yours to announce.
+2. STORY — Then drop into the true origin as a scene. Put the reader somewhere physical: a deck, a river, a courtroom. No throat-clearing ("Ever wondered...", "Here's a fun fact..."). The story must contain at least one image a reader could draw: a person, an object, an action.
 
-3. USE — One concrete modern sentence showing when you'd actually say it. A real moment: a meeting, a dentist visit, a party. One sentence or two short ones, then stop.
+3. MEANING — One plain sentence that states directly what the idiom means today. This is the takeaway; say it outright, never leave it implied. E.g.: So to *read someone the riot act* means to give them one strict, final warning to stop.
+
+4. USE — One straightforward example of someone using it, as a quoted sentence a real person would say. E.g.: "My manager read us the riot act for missing the deadline twice." One example, then stop.
+
+Wrap the idiom phrase in *asterisks* every time the full phrase appears in the post.
 
 # The accuracy rule — this outranks everything else
 
@@ -57,9 +61,9 @@ No emoji. No hashtags. No engagement bait. No closing question.
 
 # Length
 
-60 to 160 words. The story carries the weight; the reveal and use are short.
+60 to 170 words. The story carries the weight; the name, meaning, and use lines are short.
 
-Return only the post text. No preamble, no title, no quotation marks around it."""
+Return only the post text. No preamble, no title, no quotation marks around the whole post."""
 
 
 def build_idiom_user_turn(topic: dict) -> str:
@@ -125,9 +129,11 @@ THRESHOLDS = {
 REQUIRE_EXTRACTED_GIFT = True
 
 
-IDIOM_CRITIC_SYSTEM_PROMPT = """You are a ruthless editor for an X account. This format tells the TRUE origin story of a common idiom in three invisible beats: STORY (the origin as a scene), REVEAL (the idiom landing as the punchline), USE (one modern moment to say it).
+IDIOM_CRITIC_SYSTEM_PROMPT = """You are a ruthless editor for an X account. This format tells the TRUE origin story of a common idiom in four beats: NAME (the first line names today's idiom, wrapped in *asterisks*), STORY (the origin as a scene), MEANING (one plain sentence stating outright what the idiom means today), USE (one quoted example sentence a real person would say).
 
-You check two hard gates first, then score two axes 1 to 10. Be harsh. A 7 means "fine." Reserve 9 and 10 for drafts you would genuinely expect strangers to share.
+The reader may not know the idiom and may be reading in their second language. Nothing may be left for them to guess — they must leave knowing the phrase, the story, the meaning, and how to use it.
+
+You check three hard gates first, then score two axes 1 to 10. Be harsh. A 7 means "fine." Reserve 9 and 10 for drafts you would genuinely expect strangers to share.
 
 # HARD GATE 1: HISTORICAL ACCURACY
 You will be given VERIFIED ORIGIN (what is actually documented), a CONFIDENCE level, and sometimes POPULAR MYTH (a widespread but wrong or unprovable version).
@@ -146,8 +152,14 @@ This gate exists because popular idiom folklore is unreliable — verification o
 # HARD GATE 2: NO CONDESCENSION
 Fail this gate if the draft implies the reader believed a myth or frames the post as a correction. That includes "you probably think...", "contrary to popular belief...", "most people assume...", "despite what you've heard...", "the real story is..." — and any subtler framing that positions the reader as previously wrong. The story must be told straight, as if no myth existed.
 
+# HARD GATE 3: NOTHING LEFT TO GUESS
+Fail this gate if any of these is missing:
+- The first line does not name the idiom with the phrase wrapped in *asterisks*
+- No sentence states the idiom's meaning plainly and directly (implied-only meaning fails — a reader who has never heard the phrase must be told what it means)
+- No quoted example sentence shows someone actually using the idiom
+
 # Axis 1: RETELLABILITY
-Find the single sentence the reader would repeat tonight to someone who hasn't read the post — for this format it is almost always the REVEAL landing, or the REVEAL+USE compressed into one line. Quote it back verbatim from the draft.
+Find the single sentence the reader would repeat tonight to someone who hasn't read the post — for this format it is very often the MEANING line, or the story's best moment. Quote it back verbatim from the draft.
 
 A qualifying sentence is one a person could say aloud, unprompted, and be understood with zero context. Typically 8 to 24 words. Internal punctuation (dash, comma, colon) does not make it two sentences. It ends at the first sentence-ending mark.
 
@@ -157,9 +169,8 @@ If no such sentence exists, the draft fails — say so plainly and leave the quo
 Effort cost. Could someone exhausted, reading in a second language, get through it without re-reading a sentence? Any unexplained jargon anywhere caps this at 4. Any sentence over 20 words caps it at 5. An opening that throat-clears instead of starting inside the scene caps it at 5.
 
 # Also check, and fail outright regardless of scores:
-- Visible structure: headers, labels, bullets, numbered steps
+- Visible structure: headers, labels, bullets, numbered steps ("Meaning:" as a label fails; the meaning woven into a plain sentence passes. The *asterisks* around the idiom are expected and are NOT a violation — they render as italics.)
 - Emoji or hashtags
-- "And that's why we say..." or any other announced reveal
 - Engagement bait, a call to action, or a closing question
 - A story with no drawable image in it (no person, object, or action you could sketch)
 
@@ -172,11 +183,13 @@ When you quote an excerpt from the draft *inside a larger sentence of your own* 
 Return ONLY a JSON object, no other text, no markdown fences. `assessment` comes first:
 
 {
-  "assessment": "<accuracy check against VERIFIED ORIGIN claim by claim; then condescension check; then the retellability search: list every sentence that could stand alone, pick the strongest>",
+  "assessment": "<accuracy check against VERIFIED ORIGIN claim by claim; then condescension check; then the nothing-to-guess check (idiom named in first line? meaning stated plainly? quoted example present?); then the retellability search: list every sentence that could stand alone, pick the strongest>",
   "historical_accuracy_ok": <true|false>,
   "accuracy_notes": "<which claim fails and why, or empty string>",
   "no_condescension_ok": <true|false>,
   "condescension_notes": "<the offending framing, or empty string>",
+  "nothing_to_guess_ok": <true|false>,
+  "nothing_to_guess_notes": "<what is missing (first-line naming, plain meaning, or quoted example), or empty string>",
   "retellability": <int>,
   "fluency": <int>,
   "dinner_table_sentence": "<the raw excerpt, verbatim, no added quote marks — or an empty string>",
@@ -230,6 +243,9 @@ def evaluate(scores: dict) -> tuple[bool, list[str]]:
     if scores.get("no_condescension_ok") is not True:
         note = scores.get("condescension_notes") or "critic did not affirm no-condescension"
         reasons.append(f"condescension gate: {note}")
+    if scores.get("nothing_to_guess_ok") is not True:
+        note = scores.get("nothing_to_guess_notes") or "critic did not affirm the nothing-to-guess gate"
+        reasons.append(f"nothing-to-guess gate: {note}")
 
     for failure in scores.get("hard_failures") or []:
         reasons.append(f"hard: {failure}")
@@ -259,6 +275,8 @@ def log_fields(scores: dict, passed: bool, reasons: list[str]) -> dict:
         "critic_accuracy_notes": scores.get("accuracy_notes", ""),
         "critic_condescension_ok": scores.get("no_condescension_ok"),
         "critic_condescension_notes": scores.get("condescension_notes", ""),
+        "critic_nothing_to_guess_ok": scores.get("nothing_to_guess_ok"),
+        "critic_nothing_to_guess_notes": scores.get("nothing_to_guess_notes", ""),
         "critic_retellability": scores.get("retellability"),
         "critic_fluency": scores.get("fluency"),
         "critic_gift": scores.get("dinner_table_sentence", ""),
@@ -281,6 +299,8 @@ def build_retry_hint(scores: dict) -> str:
         parts.append(f"Accuracy problem: {scores['accuracy_notes']}")
     if scores.get("no_condescension_ok") is not True and scores.get("condescension_notes"):
         parts.append(f"Condescending framing: {scores['condescension_notes']}")
+    if scores.get("nothing_to_guess_ok") is not True and scores.get("nothing_to_guess_notes"):
+        parts.append(f"Missing clarity beat: {scores['nothing_to_guess_notes']}")
     weakest = scores.get("weakest_link", "")
     fix = scores.get("fix", "")
     if weakest:

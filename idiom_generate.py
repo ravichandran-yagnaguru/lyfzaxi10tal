@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 
 import anthropic
 
@@ -53,6 +54,49 @@ def pick_next_idiom(recent_history: list[dict], exclude_ids: set = frozenset()) 
     if never_used:
         return random.choice(never_used)
     return max(eligible, key=last_used_index)
+
+
+# X has no native italics; the convention is Unicode Mathematical Sans-Serif
+# Italic letters. The generator marks the idiom with *asterisks* (validated
+# mechanically below), and this converts those spans right before posting —
+# validation always runs on the plain-asterisk text so verbatim checks and
+# critic quotes stay trivially comparable.
+_ITALIC_UPPER_OFFSET = 0x1D608 - ord("A")
+_ITALIC_LOWER_OFFSET = 0x1D622 - ord("a")
+_MARKED_SPAN = re.compile(r"\*([^*\n]+)\*")
+
+
+def _to_italic_unicode(text: str) -> str:
+    out = []
+    for ch in text:
+        if "A" <= ch <= "Z":
+            out.append(chr(ord(ch) + _ITALIC_UPPER_OFFSET))
+        elif "a" <= ch <= "z":
+            out.append(chr(ord(ch) + _ITALIC_LOWER_OFFSET))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def italicize_marked(text: str) -> str:
+    """Replace every *marked span* with Unicode italic characters."""
+    return _MARKED_SPAN.sub(lambda m: _to_italic_unicode(m.group(1)), text)
+
+
+def idiom_rule_checks(draft: str, topic: dict) -> list[str]:
+    """Deterministic checks for the four-beat structure — the parts of the
+    nothing-to-guess gate that are countable don't rest on the critic's
+    judgment (same principle as validate.gift_checks)."""
+    violations = []
+    first_line = draft.strip().splitlines()[0] if draft.strip() else ""
+
+    if f"*{topic['idiom'].lower()}*" not in first_line.lower():
+        violations.append(
+            f"first line must name the idiom wrapped in asterisks: *{topic['idiom']}*"
+        )
+    if not re.search(r'["“][^"“”]{5,}["”]', draft):
+        violations.append("no quoted usage example found (the USE beat must be a quoted sentence)")
+    return violations
 
 
 def generate_idiom_draft(topic: dict, retry_hint: str = "") -> str:
@@ -107,7 +151,7 @@ def validate_idiom_draft(draft: str, topic: dict) -> tuple[bool, list[str], dict
     same mechanical gift re-check the five-beat gate uses (the critic's
     extracted sentence must be verbatim and singular — same key name,
     dinner_table_sentence, so gift_checks applies unchanged)."""
-    reasons = rule_based_checks(draft)
+    reasons = rule_based_checks(draft) + idiom_rule_checks(draft, topic)
     if reasons:
         return False, reasons, None
 

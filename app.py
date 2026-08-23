@@ -206,19 +206,22 @@ def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
             logger.warning("Idiom image failed, shipping text-only: %s", e)
 
         opening_line = _opening_line(draft)
+        # Validation ran on the plain *asterisk* text; the posted version
+        # carries the idiom in Unicode italics.
+        final_text = idiom_generate.italicize_marked(draft)
 
         if dry_run:
             return {
                 "status": "dry_run",
                 "format": "idiom",
                 "topic": topic["id"],
-                "text": draft,
+                "text": final_text,
                 "image_path": image_path,
                 "image_error": image_error,
                 "critic_scores": idiom_prompt.log_fields(scores, passed, reasons) if scores else None,
             }
 
-        tweet_id = poster.post(draft, image_path)
+        tweet_id = poster.post(final_text, image_path)
         state.record_post(
             {
                 "topic_id": topic["id"],
