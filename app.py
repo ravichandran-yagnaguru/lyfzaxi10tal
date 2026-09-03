@@ -23,6 +23,7 @@ import idiom_topics
 import images
 import poster
 import state
+import topic_generate
 import topics
 import validate
 from idiom_images import IdiomImageError
@@ -73,12 +74,15 @@ def run_pipeline(dry_run: bool) -> dict:
             return {"status": "skipped_duplicate_guard", "minutes_since_last_post": round(minutes_since, 1)}
 
     tried_topic_ids: set = set()
-    topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)
+    topic, topic_is_dynamic = topic_generate.get_dynamic_topic(recent)
     failure_reasons: list[str] = []
     retry_hint = ""
 
     for attempt in range(1, config.MAX_GENERATION_ATTEMPTS + 1):
-        logger.info("Attempt %d/%d for topic '%s'", attempt, config.MAX_GENERATION_ATTEMPTS, topic["id"])
+        logger.info(
+            "Attempt %d/%d for topic '%s' (dynamic=%s)",
+            attempt, config.MAX_GENERATION_ATTEMPTS, topic["id"], topic_is_dynamic,
+        )
 
         draft = generate.generate_draft(topic, recent_openings, retry_hint)
         passed, reasons, scores = validate.validate_draft(draft, topic, recent_openings)
@@ -96,12 +100,16 @@ def run_pipeline(dry_run: bool) -> dict:
         try:
             image = images.source_image(topic)
         except ImageSourcingError as e:
+            # Both image types are real network calls now (the diagram path
+            # moved from self-authored SVG to Gemini) -- either can fail, so
+            # always fall back to the curated bank's next-best topic rather
+            # than retrying the same doomed one.
             failure_reasons = [f"image sourcing failed: {e}"]
             logger.info("Image sourcing failed: %s", e)
-            if topic["image_type"] == "photo":
-                tried_topic_ids.add(topic["id"])
-                topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)
-                retry_hint = ""
+            tried_topic_ids.add(topic["id"])
+            topic = topics.pick_next_topic(recent, exclude_ids=tried_topic_ids)
+            topic_is_dynamic = False
+            retry_hint = ""
             continue
 
         opening_line = _opening_line(draft)
@@ -110,6 +118,7 @@ def run_pipeline(dry_run: bool) -> dict:
             return {
                 "status": "dry_run",
                 "topic": topic["id"],
+                "topic_is_dynamic": topic_is_dynamic,
                 "category": topic["category"],
                 "text": draft,
                 "image_path": image.path,
@@ -118,19 +127,27 @@ def run_pipeline(dry_run: bool) -> dict:
             }
 
         tweet_id = poster.post(draft, image.path)
-        state.record_post(
-            {
-                "topic_id": topic["id"],
-                "category": topic["category"],
-                "status": "posted",
-                "tweet_id": tweet_id,
-                "image_source": image.source,
-                "attribution": image.attribution,
-                "opening_line": opening_line,
-            }
-        )
-        logger.info("Posted tweet %s for topic '%s'", tweet_id, topic["id"])
-        return {"status": "posted", "tweet_id": tweet_id, "topic": topic["id"]}
+        post_record = {
+            "topic_id": topic["id"],
+            "category": topic["category"],
+            "status": "posted",
+            "tweet_id": tweet_id,
+            "image_source": image.source,
+            "attribution": image.attribution,
+            "opening_line": opening_line,
+        }
+        if topic_is_dynamic:
+            # Dynamically-generated topics have no entry in topics.py for a
+            # future digest lookup to resolve -- store the descriptive text
+            # directly so topic_generate.build_recent_topics_digest() can
+            # still treat this as "already covered" going forward.
+            post_record["topic_prompt"] = topic["prompt"]
+            post_record["topic_source"] = "generated"
+        else:
+            post_record["topic_source"] = "bank"
+        state.record_post(post_record)
+        logger.info("Posted tweet %s for topic '%s' (dynamic=%s)", tweet_id, topic["id"], topic_is_dynamic)
+        return {"status": "posted", "tweet_id": tweet_id, "topic": topic["id"], "topic_is_dynamic": topic_is_dynamic}
 
     logger.error(
         "POST_SKIPPED: %s",
