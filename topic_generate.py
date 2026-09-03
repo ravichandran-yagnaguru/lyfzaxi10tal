@@ -3,44 +3,47 @@ Dynamic topic generation for the everyday-mystery format.
 
 WHY THIS EXISTS
 ----------------
-topics.py's 54-item bank is hand-curated and, at ~2 posts/day, fully cycles
-in about a month -- after that, every "new" post is necessarily a repeat of
-one of the same 54 ideas, just reshuffled. Guru reported the feed "feels
-redundant"; auditing Firestore found no duplicate-id or racing bug (the
-August fix is still holding, gaps between id repeats matched a fair
-full-cycle length) -- the bank's IDEA SPACE was finite, not the code. A
-fixed list, however well written, has a ceiling.
+The old topics.py bank was a hand-curated 54-item list, and at ~2 posts/day
+it fully cycled in about a month -- after that, every "new" post was
+necessarily a repeat of one of the same 54 ideas, just reshuffled. Guru
+reported the feed "feels redundant"; auditing Firestore found no
+duplicate-id or racing bug (the earlier tie-break fix was still holding,
+gaps between id repeats matched a fair full-cycle length) -- the bank's IDEA
+SPACE was finite, not the code. A fixed list, however well written, has a
+ceiling.
 
-This module removes the ceiling by generating a fresh candidate topic per
-post instead of only rotating a static list, while keeping the exact
-discipline that the v1 -> v2 rebuild introduced: v1 let the model pick a
-subject and write about it freely, and it produced things like "sharding" --
-technically correct, universally unreadable, because nothing forced a real
-Universal Door. Free-generating topics on the fly risks that same failure
-mode reappearing unless the candidate is held to the identical schema as the
-curated bank AND passes a dedicated gate before any drafting happens.
+This module removes the ceiling entirely: there is no fallback bank. Every
+post generates a fresh candidate topic, gated for quality, or the slot is
+skipped -- same as any other validation failure in this pipeline. Per
+Guru's explicit instruction: "if AI is not able to pick anything pass the
+gate, we don't want to post, rather than picking up from the bank."
+
+The discipline the old bank enforced is kept even though the bank itself is
+gone: the original v1 engine let the model pick a subject and write about it
+freely, and it produced things like "sharding" -- technically correct,
+universally unreadable, because nothing forced a real Universal Door.
+Free-generating topics without structure would risk that same failure mode
+reappearing, so every candidate is still held to the identical schema the
+bank used to enforce, and still passes a dedicated gate before any drafting
+happens.
 
 THE PIPELINE
 ------------
-1. build_recent_topics_digest() -- pulls real post history (not a fixed
-   list) as the novelty baseline. Works for both bank-origin topics (looked
-   up in topics.py) and previously-generated ones (their own prompt/door
-   text is stored on the Firestore record at post time -- see app.py).
+1. build_recent_topics_digest() -- pulls real post history as the novelty
+   baseline. Every post_history record (bank-origin posts from before this
+   change, migrated once; every dynamically-generated post going forward)
+   stores its own `topic_prompt` text directly, so this never depends on a
+   static file -- it only ever reads Firestore.
 2. generate_candidate() -- one Claude Sonnet call proposing ONE new topic in
-   the exact topics.py schema, explicitly shown the digest and told not to
-   duplicate the underlying phenomenon of anything in it.
+   the schema below, explicitly shown the digest and told not to duplicate
+   the underlying phenomenon of anything in it.
 3. topic_gate_check() -- one Claude Haiku call, separate from the draft
    critic, checking the candidate itself (not a draft) on three axes before
    any expensive generation happens: genuine Universal Door (not
    subject-first), factual plausibility, and semantic novelty vs the digest.
-4. get_dynamic_topic() -- orchestrates 1-3 with MAX_TOPIC_ATTEMPTS retries,
-   and falls back to topics.pick_next_topic() (the original curated-bank
-   rotation) if generation can't produce a passing candidate -- a slot must
-   never go empty because of a model hiccup.
-
-topics.py is NOT deleted or bypassed entirely: it remains the fallback and
-the source of the schema/category/emotion vocabulary the generator is
-constrained to, so long-term categorization and analysis stay comparable.
+4. get_dynamic_topic() -- orchestrates 1-3 with MAX_TOPIC_ATTEMPTS retries.
+   Returns None if nothing passes -- the caller (app.py) must treat that as
+   a skipped slot, not reach for a substitute.
 """
 
 from __future__ import annotations
@@ -52,19 +55,23 @@ import re
 import anthropic
 
 import config
-import topics
 from llm_utils import extract_text
 
 logger = logging.getLogger("concept-bot")
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3)
 
-# Observed empirically: with the 54-topic bank already covering a lot of
-# ground, the gate (deliberately as strict as the rest of this account's
-# validation) rejects roughly 2 of 3 candidates -- 3 attempts sometimes
-# exhausted without a pass in local testing. 6 attempts costs a few more
-# cents per post but meaningfully raises the odds of landing a genuinely
-# new, genuinely universal topic before falling back to the curated bank.
+# Fixed vocabulary a candidate's category/emotion must come from -- kept
+# stable (not derived from any file) so categorization stays comparable over
+# time even though the topic content itself is now unbounded.
+CATEGORIES = ["body", "everyday", "history", "money", "psychology", "science", "tech"]
+EMOTIONS = ["surprise", "amusement", "alarm", "awe", "wrong"]
+
+# Observed empirically: the gate (deliberately as strict as the rest of this
+# account's validation) rejects roughly 2 of 3 candidates -- 3 attempts
+# sometimes exhausted without a pass in local testing. 6 attempts costs a
+# few more cents per post but meaningfully raises the odds of landing a
+# genuinely new, genuinely universal topic before the slot is skipped.
 MAX_TOPIC_ATTEMPTS = 6
 DIGEST_LIMIT = 80
 
@@ -82,10 +89,11 @@ def _slugify(text: str) -> str:
 
 def build_recent_topics_digest(limit: int = DIGEST_LIMIT) -> list[dict]:
     """Most-recent-first list of {"id", "category", "description"} covering
-    every distinct everyday-format topic actually posted recently -- bank
-    topics resolved via topics.get_topic(), dynamically-generated ones read
-    from the `topic_prompt` field app.py stores on their post_history record.
-    Skips idiom-format entries (different bank, different novelty space)."""
+    every distinct everyday-format topic actually posted recently, read
+    entirely from Firestore's `topic_prompt` field on each post_history
+    record (every dynamically-generated post stores its own; historical
+    bank-origin posts were migrated once when the bank was retired). Skips
+    idiom-format entries (different bank, different novelty space)."""
     import state
 
     recent = state.get_recent_history(limit)
@@ -101,14 +109,8 @@ def build_recent_topics_digest(limit: int = DIGEST_LIMIT) -> list[dict]:
         seen_ids.add(tid)
 
         description = h.get("topic_prompt")
-        category = h.get("category", "")
-        if not description:
-            bank_topic = topics.get_topic(tid)
-            if bank_topic:
-                description = bank_topic["prompt"]
-                category = bank_topic["category"]
         if description:
-            digest.append({"id": tid, "category": category, "description": description})
+            digest.append({"id": tid, "category": h.get("category", ""), "description": description})
 
     return digest
 
@@ -137,12 +139,12 @@ Reject any candidate where the honest answer to "has a person with zero educatio
 # What you must produce -- exact schema, all fields required
 
 - id: a short lowercase snake_case slug, 2-4 words, unique-sounding
-- category: EXACTLY one of: {", ".join(topics.CATEGORIES)}
+- category: EXACTLY one of: {", ".join(CATEGORIES)}
 - prompt: the actual mechanism/fact being explained, one or two sentences, written for someone who will draft a post from it (not the post itself)
 - universal_door: the lived experience that is the ONLY permitted entry point -- one sentence, concrete, something a reader has personally done or felt
 - hook_seed: a seed for the opening line, 12 words or fewer, may be rephrased by the writer but must not raise the reading cost
 - dinner_table_line: the retellable sentence this post must land -- close in spirit to what a reader would repeat at dinner tonight
-- emotion: EXACTLY one of: {", ".join(topics.EMOTIONS)}
+- emotion: EXACTLY one of: {", ".join(EMOTIONS)}
 - image_type: "diagram" if the concept is abstract/mechanism-based (illustrated), "photo" if it's a concrete physical object/scene (real photo) -- if "photo", also include photo_keywords (a search query) and photo_subject (the singular noun a photo's own description must mention)
 
 # Ground rules
@@ -270,9 +272,9 @@ def topic_gate_check(candidate: dict, digest: list[dict]) -> tuple[bool, list[st
     for field in required:
         if not candidate.get(field):
             reasons.append(f"missing required field '{field}'")
-    if candidate.get("category") not in topics.CATEGORIES:
+    if candidate.get("category") not in CATEGORIES:
         reasons.append(f"invalid category {candidate.get('category')!r}")
-    if candidate.get("emotion") not in topics.EMOTIONS:
+    if candidate.get("emotion") not in EMOTIONS:
         reasons.append(f"invalid emotion {candidate.get('emotion')!r}")
     if candidate.get("image_type") == "photo" and not (candidate.get("photo_keywords") and candidate.get("photo_subject")):
         reasons.append("photo topic missing photo_keywords/photo_subject")
@@ -286,10 +288,11 @@ def topic_gate_check(candidate: dict, digest: list[dict]) -> tuple[bool, list[st
 # Orchestration
 # --------------------------------------------------------------------------
 
-def get_dynamic_topic(recent_history: list[dict]) -> tuple[dict, bool]:
-    """Returns (topic, is_dynamic). Tries live generation up to
-    MAX_TOPIC_ATTEMPTS times; falls back to the curated bank's
-    topics.pick_next_topic() if nothing passes the gate."""
+def get_dynamic_topic(recent_history: list[dict]) -> dict | None:
+    """Tries live generation up to MAX_TOPIC_ATTEMPTS times. Returns the
+    accepted topic dict, or None if nothing passed the gate -- there is no
+    fallback bank. The caller must treat None as a skipped slot, exactly
+    like any other validation failure in this pipeline."""
     digest = build_recent_topics_digest()
     last_category = recent_history[0]["category"] if recent_history else None
 
@@ -316,7 +319,7 @@ def get_dynamic_topic(recent_history: list[dict]) -> tuple[dict, bool]:
 
         if passed:
             logger.info("Dynamic topic accepted: '%s' (category=%s)", candidate["id"], candidate["category"])
-            return candidate, True
+            return candidate
 
         logger.info("Topic candidate '%s' rejected: %s", candidate.get("id"), reasons)
         fix = scores.get("fix", "")
@@ -325,5 +328,5 @@ def get_dynamic_topic(recent_history: list[dict]) -> tuple[dict, bool]:
             summary += f" ({fix})"
         rejected_summaries.append(summary)
 
-    logger.warning("Dynamic topic generation exhausted %d attempts -- falling back to the curated bank.", MAX_TOPIC_ATTEMPTS)
-    return topics.pick_next_topic(recent_history), False
+    logger.warning("Dynamic topic generation exhausted %d attempts -- no fallback, slot will be skipped.", MAX_TOPIC_ATTEMPTS)
+    return None

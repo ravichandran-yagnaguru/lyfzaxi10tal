@@ -44,9 +44,69 @@ from collections import Counter
 
 import config
 import generate
-import topics
+import topic_generate
 import validate
 from validate_prompt import THRESHOLDS
+
+# Real topic dicts, preserved from the retired topics.py bank so the
+# CONTROLS below (each targeting a specific gate against a specific real
+# topic) keep working without depending on that file. Extracted once when
+# the bank was removed in favor of topic_generate.py's dynamic generation --
+# not maintained as a living bank, just fixed fixtures for these six checks.
+_CONTROL_TOPICS = {
+    "sharding": {
+        "id": "sharding", "category": "tech",
+        "prompt": "Sharding and horizontal scale: no single machine could serve everyone, so data is split across many. Explain via one librarian versus a library split into rooms by surname.",
+        "universal_door": "Two billion people open the same app at breakfast.",
+        "hook_seed": "Two billion people open Instagram at breakfast. It doesn't collapse.",
+        "dinner_table_line": "There is no 'the server' — you and your neighbour are being served by completely different machines.",
+        "emotion": "awe", "image_type": "diagram",
+    },
+    "cloudy_ice": {
+        "id": "cloudy_ice", "category": "science",
+        "prompt": "Ice freezes from the outside in, pushing dissolved air and impurities to the last-frozen centre — the cloud is trapped gas.",
+        "universal_door": "Home ice cubes are cloudy; bar ice is clear.",
+        "hook_seed": "Your ice cubes are cloudy in the middle. Bar ice isn't.",
+        "dinner_table_line": "That cloud is trapped air — clear ice is just ice that was frozen slowly enough for the air to escape.",
+        "emotion": "surprise", "image_type": "photo",
+        "photo_keywords": "ice cubes glass close up", "photo_subject": "ice",
+    },
+    "bread_stales_fridge": {
+        "id": "bread_stales_fridge", "category": "science",
+        "prompt": "Staling is starch retrogradation, not drying — and it runs fastest just above freezing, so the fridge is the worst place for bread.",
+        "universal_door": "Putting bread in the fridge to keep it fresh.",
+        "hook_seed": "The fridge is the worst possible place for bread.",
+        "dinner_table_line": "Bread goes stale fastest at fridge temperature — the freezer is fine, the counter is fine, the fridge is the one bad option.",
+        "emotion": "wrong", "image_type": "photo",
+        "photo_keywords": "sliced bread loaf", "photo_subject": "bread",
+    },
+    "doorway_effect": {
+        "id": "doorway_effect", "category": "body",
+        "prompt": "The doorway effect: memory is chunked by context, and physically crossing a boundary flushes the working-memory buffer tied to the previous room.",
+        "universal_door": "Walking into a room and instantly forgetting why.",
+        "hook_seed": "You walk into the kitchen and forget why. Every time.",
+        "dinner_table_line": "It isn't your memory failing — the doorway itself wipes it, and walking back actually helps.",
+        "emotion": "surprise", "image_type": "diagram",
+    },
+    "weep_holes": {
+        "id": "weep_holes", "category": "everyday",
+        "prompt": "Weep holes: small gaps left in brickwork let trapped moisture drain and ventilate the cavity behind the wall.",
+        "universal_door": "Small holes in the brick wall of almost every building.",
+        "hook_seed": "Those little holes in brick walls aren't mistakes.",
+        "dinner_table_line": "Every brick wall needs to breathe — seal those holes and the wall rots from inside.",
+        "emotion": "surprise", "image_type": "photo",
+        "photo_keywords": "brick wall weep holes mortar", "photo_subject": "brick",
+    },
+    "onion_tears": {
+        "id": "onion_tears", "category": "science",
+        "prompt": "Cutting ruptures cells, releasing enzymes that form a volatile sulfur compound; it reacts with eye moisture to form a mild acid, and tears are the flush response.",
+        "universal_door": "Crying over a chopping board.",
+        "hook_seed": "Onions don't make you cry. They make acid in your eyes.",
+        "dinner_table_line": "The onion is releasing a gas that turns into acid the moment it touches your eye — the tears are your body rinsing it out.",
+        "emotion": "alarm", "image_type": "photo",
+        "photo_keywords": "chopped onion cutting board", "photo_subject": "onion",
+    },
+}
 
 
 # ==========================================================================
@@ -205,9 +265,9 @@ def run_controls() -> list[dict]:
 
     results = []
     for ctrl in CONTROLS:
-        topic = topics.get_topic(ctrl["topic_id"])
+        topic = _CONTROL_TOPICS.get(ctrl["topic_id"])
         if topic is None:
-            print(f"\n!! skipping {ctrl['name']}: topic '{ctrl['topic_id']}' not in bank")
+            print(f"\n!! skipping {ctrl['name']}: no fixture topic '{ctrl['topic_id']}'")
             continue
 
         try:
@@ -253,23 +313,19 @@ def run_real_drafts(n: int) -> list[dict]:
     print(f"REAL DRAFTS — {n} live generations")
     print("=" * 78)
 
-    # Sample across categories rather than letting rotation pick, so the
-    # distribution isn't dominated by whichever category rotation favours.
-    by_cat: dict[str, list] = {}
-    for t in topics.TOPICS:
-        by_cat.setdefault(t["category"], []).append(t)
-
+    # No fixed bank to sample from anymore -- generate n fresh candidates via
+    # topic_generate directly, rotating the "avoid this category" hint across
+    # picks so the distribution isn't dominated by one category. Skips
+    # topic_generate's own gate deliberately: this harness calibrates the
+    # DRAFT critic, not the topic gate, so a topic doesn't need to have
+    # passed that gate to be a useful draft-critic test case.
+    cats = topic_generate.CATEGORIES
     picks = []
-    cats = sorted(by_cat)
-    i = 0
-    while len(picks) < n:
-        cat = cats[i % len(cats)]
-        pool = [t for t in by_cat[cat] if t not in picks]
-        if pool:
-            picks.append(random.choice(pool))
-        i += 1
-        if i > n * len(cats) + 50:
-            break
+    for i in range(n):
+        try:
+            picks.append(topic_generate.generate_candidate(digest=[], last_category=cats[i % len(cats)]))
+        except Exception as e:  # noqa: BLE001 — one flaky call shouldn't abort the whole suite
+            print(f"\n!! topic generation failed for pick {i + 1}: {e}")
 
     results = []
     for idx, topic in enumerate(picks, 1):
@@ -423,13 +479,6 @@ def main() -> int:
 
     if not config.ANTHROPIC_API_KEY:
         print("ANTHROPIC_API_KEY is not set — check your .env", file=sys.stderr)
-        return 2
-
-    issues = topics.validate_bank()
-    if issues:
-        print("Topic bank is invalid, fix before calibrating:", file=sys.stderr)
-        for i in issues:
-            print("  -", i, file=sys.stderr)
         return 2
 
     controls = run_controls()
