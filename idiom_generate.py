@@ -42,7 +42,13 @@ def pick_next_idiom(recent_history: list[dict], exclude_ids: set = frozenset()) 
     if not eligible:
         return None
 
-    posted_order = [h["topic_id"] for h in recent_history]  # most-recent-first
+    # .get(), not h["topic_id"] -- post_history is shared with the everyday
+    # pipeline, and a well-formed-but-sparse record there (e.g. a skipped
+    # slot with no topic at all) must never crash idiom selection. A 500
+    # here on 2026-09-11 poisoned every invocation of BOTH pipelines for the
+    # next 5 days, since this ran on every single request regardless of
+    # format -- see app.py's matching fix for the everyday-side equivalent.
+    posted_order = [h.get("topic_id") for h in recent_history]  # most-recent-first
 
     def last_used_index(topic: dict) -> int:
         try:

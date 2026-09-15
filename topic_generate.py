@@ -294,7 +294,13 @@ def get_dynamic_topic(recent_history: list[dict]) -> dict | None:
     fallback bank. The caller must treat None as a skipped slot, exactly
     like any other validation failure in this pipeline."""
     digest = build_recent_topics_digest()
-    last_category = recent_history[0]["category"] if recent_history else None
+    # .get(), not recent_history[0]["category"] -- the most recent record can
+    # be a well-formed-but-sparse skip (e.g. "topic generation exhausted",
+    # which has no topic/category at all) and this line ran on every single
+    # invocation, so a bare subscript here turned one such record into a
+    # 5-day, self-perpetuating outage (2026-09-11 to 2026-09-15) affecting
+    # both formats at once.
+    last_category = recent_history[0].get("category") if recent_history else None
 
     # Accumulate EVERY rejection this run, not just the latest -- carrying
     # only the last failure forward let the model forget its own earlier
