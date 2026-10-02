@@ -20,6 +20,13 @@
 # so it will never delete or modify the idiom job. Change the idiom cadence
 # directly via gcloud. Idiom slots sit roughly 2h from the nearest everyday
 # slot on each side, well clear of the 20-minute duplicate-post guard.
+#
+# A third job, concept-bot-idiom-refill (04:30, 14:30, 22:30 ET, hitting
+# /refill_idioms), also lives outside this file. It researches new idioms into
+# the Firestore idiom_queue whenever fewer than 8 are ready, and is a cheap
+# no-op otherwise. It sits off-peak so a research run never queues behind (or
+# in front of) a post slot on the single gunicorn worker. Three jobs total:
+# the full Cloud Scheduler free tier.
 timezone: "America/New_York"
 weekly_schedule:
   monday:    ["08:00", "12:00", "17:00", "20:00"]
