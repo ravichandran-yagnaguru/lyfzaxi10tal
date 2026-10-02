@@ -170,14 +170,14 @@ Return ONLY a JSON object, no other text, no markdown fences:
 
 
 def _parse_json_response(text: str) -> dict:
+    """Parse the first complete JSON object in a model reply, ignoring any
+    prose or a second object after it (models occasionally add one)."""
     cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise
+    start = cleaned.find("{")
+    if start < 0:
+        raise json.JSONDecodeError("no JSON object found", cleaned, 0)
+    obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+    return obj
 
 
 def generate_candidate(digest: list[dict], last_category: str | None, retry_hint: str = "") -> dict:
@@ -285,6 +285,149 @@ def topic_gate_check(candidate: dict, digest: list[dict]) -> tuple[bool, list[st
 
 
 # --------------------------------------------------------------------------
+# Duplicate gate: ALL-TIME history, code first, then a focused pairwise check
+# --------------------------------------------------------------------------
+# The gate above asks a model to scan the last DIGEST_LIMIT topics and decide
+# "is this substantially the same idea as any of these?". That is leaky: it let
+# gen_why_ketchup_wont_pour through after ketchup_wont_pour, gen_microwave_cold_
+# spots after microwave_uneven, and gen_why_bread_dries_stale after
+# bread_stales_fridge -- real duplicates, all posted. And a recent-N window
+# forgets anything older by construction. So uniqueness is enforced here
+# against EVERYTHING ever posted:
+#   1. retrieve the closest past topics by word overlap (any age)
+#   2. a hard block in code for clear overlaps, independent of any model
+#   3. a focused pairwise question to the model about only those closest few,
+#      which is far more reliable than scanning an 80-entry list
+
+_STOP = set(
+    "a an the of to in on at for and or but is are was were be been it its this that these those with as by "
+    "from into than then so such not no can could will would should may might must do does did done have has "
+    "had having you your yours they their them we our us i me my he she his her who whom which what when "
+    "where why how all any each both few more most other some own same just also only very much many one "
+    "two three out up down off over under again once here there about between through during before after "
+    "above below because while until if else too".split()
+)
+_GENERIC = set(
+    "people person thing things way time lot often usually actually really feel feels feeling makes make "
+    "made get gets getting got go goes going come comes back first part gen effect bias reason reasons "
+    "explain explains explained phenomenon mechanism cause caused called known".split()
+)
+
+# Hard blocks must rest on real evidence. An overlap coefficient on a 1-2 word
+# set is meaningless (an id-only description sharing one word scores 0.5), so
+# the description rule demands sizeable descriptions AND many shared words;
+# everything between "clearly the same" and "clearly different" goes to the
+# pairwise model check instead.
+HARD_DESC_OVERLAP = 0.55
+HARD_DESC_MIN_WORDS = 6      # both descriptions must have at least this many content words
+HARD_DESC_MIN_SHARED = 5
+HARD_ID_OVERLAP = 0.99      # id words fully contained in the other id (with >= 2 shared words)
+PAIRWISE_CANDIDATES = 8
+
+
+def _stem(w: str) -> str:
+    for suf in ("ing", "edly", "ed", "es", "s", "ly"):
+        if len(w) > len(suf) + 3 and w.endswith(suf):
+            return w[: -len(suf)]
+    return w
+
+
+def _content_words(text: str) -> set[str]:
+    return {_stem(w) for w in re.findall(r"[a-z]+", text.lower()) if w not in _STOP and w not in _GENERIC and len(w) > 2}
+
+
+def _overlap(a: set[str], b: set[str]) -> float:
+    return len(a & b) / min(len(a), len(b)) if a and b else 0.0
+
+
+def build_full_history() -> list[dict]:
+    """Every distinct everyday topic ever attempted, of any age. Records with
+    no stored description (old pre-migration topics) are represented by the
+    words in their id, which still carries the subject."""
+    import state
+
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for h in state.get_recent_history(limit=20000):
+        if h.get("format") == "idiom":
+            continue
+        tid = h.get("topic_id")
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        entries.append({"id": tid, "description": h.get("topic_prompt") or tid.replace("gen_", "").replace("_", " ")})
+    return entries
+
+
+def _closest_past(candidate: dict, history: list[dict], k: int) -> list[dict]:
+    cand_desc = _content_words(f"{candidate.get('prompt', '')} {candidate.get('universal_door', '')}")
+    cand_id = _content_words(candidate.get("id", "").replace("_", " "))
+    scored = []
+    for h in history:
+        past_desc = _content_words(h["description"])
+        past_id = _content_words(h["id"].replace("_", " "))
+        scored.append({
+            "past": h,
+            "desc_overlap": _overlap(cand_desc, past_desc),
+            "desc_shared": len(cand_desc & past_desc),
+            "desc_sizes": (len(cand_desc), len(past_desc)),
+            "id_overlap": _overlap(cand_id, past_id),
+            "id_shared": len(cand_id & past_id),
+        })
+    scored.sort(key=lambda r: r["desc_overlap"] + r["id_overlap"], reverse=True)
+    return scored[:k]
+
+
+_PAIRWISE_SYSTEM = """You compare ONE candidate topic for an everyday-mystery X account against a short list of topics the account has ALREADY posted, and decide which listed topics are a REPEAT of the candidate.
+
+First, for the candidate and for each listed topic, state in under 8 words the specific everyday thing or question it explains (its "subject").
+
+Two topics are a REPEAT only if their subjects are the same everyday thing, so that a reader of the earlier post would think "I've already read this". A different angle, wording, entry point or minor detail on the SAME subject is still a repeat.
+  REPEAT: "why feet fall asleep" and "why feet fall asleep -- the tingling pattern".
+  REPEAT: "microwaves heat food unevenly" and "why microwaves leave cold spots".
+  REPEAT: "bread goes stale in the fridge" and "why bread dries out and goes stale".
+Topics that merely share a general principle, theme, mechanism family or field are NOT repeats, however similar the explanation:
+  NOT: "why airplane windows are round" vs "why manhole covers are round".
+  NOT: "why cutting onions makes you cry" vs "why cut apples turn brown".
+  NOT: "why feet fall asleep" vs "why feet hurt in the cold".
+  NOT: "a casino hides clocks" vs "cabin lights dim at takeoff".
+
+Return ONLY a JSON object, no other text:
+{"candidate_subject": "...", "listed_subjects": ["1: ...", "2: ..."], "same_as": [<numbers of listed topics that are REPEATS; empty list if none>], "why": "<one short sentence>"}"""
+
+
+def find_duplicate(candidate: dict, history: list[dict]) -> tuple[str, str] | None:
+    """Returns (past_topic_id, reason) if the candidate repeats anything ever
+    posted, else None."""
+    closest = _closest_past(candidate, history, PAIRWISE_CANDIDATES)
+
+    for c in closest:
+        past = c["past"]
+        sizes_ok = min(c["desc_sizes"]) >= HARD_DESC_MIN_WORDS
+        if sizes_ok and c["desc_shared"] >= HARD_DESC_MIN_SHARED and c["desc_overlap"] >= HARD_DESC_OVERLAP:
+            return past["id"], f"description word overlap {c['desc_overlap']:.2f} ({c['desc_shared']} shared words) with '{past['id']}'"
+        if c["id_overlap"] >= HARD_ID_OVERLAP and c["id_shared"] >= 2:
+            return past["id"], f"topic id overlaps '{past['id']}' ({c['id_shared']} shared subject words)"
+
+    if not closest:
+        return None
+    listing = "\n".join(f"{i}. {c['past']['description']}" for i, c in enumerate(closest, 1))
+    resp = _client.messages.create(
+        model=config.CRITIC_MODEL,
+        max_tokens=700,
+        thinking={"type": "disabled"},
+        system=_PAIRWISE_SYSTEM,
+        messages=[{"role": "user", "content": f"CANDIDATE: {candidate.get('prompt')}\n\nALREADY POSTED:\n{listing}"}],
+    )
+    verdict = _parse_json_response(extract_text(resp))
+    same = [i for i in verdict.get("same_as", []) if isinstance(i, int) and 1 <= i <= len(closest)]
+    if same:
+        past = closest[same[0] - 1]["past"]
+        return past["id"], f"model judged it a repeat of '{past['id']}': {verdict.get('why', '')}"
+    return None
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
 
@@ -294,6 +437,7 @@ def get_dynamic_topic(recent_history: list[dict]) -> dict | None:
     fallback bank. The caller must treat None as a skipped slot, exactly
     like any other validation failure in this pipeline."""
     digest = build_recent_topics_digest()
+    full_history = build_full_history()
     # .get(), not recent_history[0]["category"] -- the most recent record can
     # be a well-formed-but-sparse skip (e.g. "topic generation exhausted",
     # which has no topic/category at all) and this line ran on every single
@@ -324,8 +468,16 @@ def get_dynamic_topic(recent_history: list[dict]) -> dict | None:
             continue
 
         if passed:
-            logger.info("Dynamic topic accepted: '%s' (category=%s)", candidate["id"], candidate["category"])
-            return candidate
+            try:
+                dup = find_duplicate(candidate, full_history)
+            except Exception as e:  # noqa: BLE001
+                # Fail closed: if uniqueness cannot be established, do not accept.
+                logger.warning("Duplicate check errored for '%s': %s", candidate.get("id"), e)
+                dup = (candidate.get("id", "?"), f"duplicate check errored: {e}")
+            if dup is None:
+                logger.info("Dynamic topic accepted: '%s' (category=%s)", candidate["id"], candidate["category"])
+                return candidate
+            passed, reasons, scores = False, [f"duplicate: {dup[1]}"], {"fix": "Pick a clearly different subject, not a new angle on the same phenomenon."}
 
         logger.info("Topic candidate '%s' rejected: %s", candidate.get("id"), reasons)
         fix = scores.get("fix", "")

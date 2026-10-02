@@ -136,14 +136,14 @@ def covered_phrases(idiom_history: list[dict]) -> list[str]:
 # --------------------------------------------------------------------------
 
 def _parse_json(text: str) -> dict:
+    """Parse the first complete JSON object in a model reply, ignoring any
+    prose or a second object after it (models occasionally add one)."""
     cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise
+    start = cleaned.find("{")
+    if start < 0:
+        raise json.JSONDecodeError("no JSON object found", cleaned, 0)
+    obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+    return obj
 
 
 # --------------------------------------------------------------------------
