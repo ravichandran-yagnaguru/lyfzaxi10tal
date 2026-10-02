@@ -180,15 +180,55 @@ def _parse_json_response(text: str) -> dict:
     return obj
 
 
-def generate_candidate(digest: list[dict], last_category: str | None, retry_hint: str = "") -> dict:
-    avoid_category_line = (
-        f"\n\nDo not use category \"{last_category}\" -- that was the immediately preceding post's category."
-        if last_category else ""
+def overused_subjects(full_history: list[dict], top: int = 14) -> str:
+    """The subject words that show up most across everything ever posted,
+    computed from the history itself (not a fixed list). Telling the model
+    where it has already gone heavily is what pushes it into new territory --
+    left alone it keeps returning to the same few everyday subjects (feet,
+    bread, ketchup...), which is where most of its rejected candidates came
+    from."""
+    from collections import Counter
+
+    counts: Counter = Counter()
+    for h in full_history:
+        counts.update(_content_words(h["id"].replace("_", " ")))
+    common = [(w, n) for w, n in counts.most_common(top) if n >= 2]
+    return ", ".join(f"{w} ({n})" for w, n in common)
+
+
+def choose_target_category(recent_history: list[dict]) -> str:
+    """The category used least recently (never-used first), ties broken at
+    random, never the immediately preceding one. Forcing the category spreads
+    topics across all seven areas instead of letting the model gravitate to
+    whichever it likes."""
+    import random
+
+    last_seen: dict[str, int] = {}
+    for i, h in enumerate(recent_history):
+        cat = h.get("category")
+        if cat in CATEGORIES and cat not in last_seen:
+            last_seen[cat] = i
+    immediately_previous = recent_history[0].get("category") if recent_history else None
+    pool = [c for c in CATEGORIES if c != immediately_previous] or list(CATEGORIES)
+    oldest = max(last_seen.get(c, len(recent_history) + 1) for c in pool)
+    return random.choice([c for c in pool if last_seen.get(c, len(recent_history) + 1) == oldest])
+
+
+def generate_candidate(digest: list[dict], last_category: str | None, retry_hint: str = "",
+                       target_category: str | None = None, saturated: str = "") -> dict:
+    category_line = (
+        f"\n\nThe category for this topic MUST be \"{target_category}\"."
+        if target_category else
+        (f"\n\nDo not use category \"{last_category}\" -- that was the immediately preceding post's category." if last_category else "")
+    )
+    saturated_line = (
+        f"\n\nSUBJECTS ALREADY OVER-COVERED (the account has gone heavy on these; stay clear of them and explore genuinely different everyday territory): {saturated}"
+        if saturated else ""
     )
     user_turn = (
         f"ALREADY COVERED (do not repeat the underlying idea of any of these)\n"
         f"{_digest_block(digest)}"
-        f"{avoid_category_line}{retry_hint}\n\n"
+        f"{saturated_line}{category_line}{retry_hint}\n\n"
         "Propose one new topic now."
     )
 
@@ -213,7 +253,7 @@ def generate_candidate(digest: list[dict], last_category: str | None, retry_hint
 
 _TOPIC_CRITIC_SYSTEM_PROMPT = """You are a strict gatekeeper for candidate topics proposed for an everyday-mystery X account. You check the PROPOSAL, not a finished post -- this runs before any drafting happens, to avoid wasting a generation attempt on a bad idea.
 
-Check three things and be harsh:
+Check two things and be harsh:
 
 # 1. GENUINE UNIVERSAL DOOR
 Has essentially every human -- any age, any education, any country, possibly reading in a second language -- personally lived the `universal_door` experience? Not "could understand it" -- lived it. If the door requires domain membership, a specific culture, or specialist context, fail this.
@@ -221,10 +261,7 @@ Has essentially every human -- any age, any education, any country, possibly rea
 # 2. FACTUAL PLAUSIBILITY
 Is the `prompt` a genuinely well-established, plausible fact or mechanism -- not an invented statistic, a coin-flip claim, or something that sounds plausible but isn't actually verified common knowledge? If you're not confident it's true, fail this and say why.
 
-# 3. NOVELTY
-Compare the candidate's underlying REAL-WORLD FACT against the ALREADY COVERED list. Fail ONLY if the candidate explains the same concrete fact or mechanism as an existing entry — a reader who already read the covered entry would think "wait, this is the same thing again," not just "this reminds me of that."
-
-Do NOT fail for sharing a narrative *pattern* or psychological *shape* with a covered entry. "An unfinished task nags at you" (Zeigarnik) and "a song loop nags at you" (earworms) and "a pressure difference nags at your ear until it resolves" are three DIFFERENT facts that happen to share the shape "unresolved state seeks resolution" — that shape is the whole genre of this account, not a reason to reject. Likewise two different body reflexes explained by two different nerve mechanisms are not duplicates just because both are "brain misreads a signal." Ask specifically: is this the same fact in a costume, or a genuinely different fact that merely rhymes structurally with one already told? Only the former fails.
+Uniqueness is NOT your job: a separate all-time duplicate check runs after you and is the single authority on repeats. Judge only the two things above.
 
 Return ONLY a JSON object, no other text, no markdown fences:
 
@@ -233,15 +270,12 @@ Return ONLY a JSON object, no other text, no markdown fences:
   "door_notes": "<why it fails, or empty string>",
   "plausibility_ok": <true|false>,
   "plausibility_notes": "<why it fails, or empty string>",
-  "novelty_ok": <true|false>,
-  "novelty_notes": "<which covered entry it overlaps with, or empty string>",
   "fix": "<one concrete sentence of direction if regenerating>"
 }"""
 
 
-def topic_gate_check(candidate: dict, digest: list[dict]) -> tuple[bool, list[str], dict]:
+def topic_gate_check(candidate: dict) -> tuple[bool, list[str], dict]:
     user_turn = (
-        f"ALREADY COVERED\n{_digest_block(digest)}\n\n"
         f"CANDIDATE\n"
         f"category: {candidate.get('category')}\n"
         f"prompt: {candidate.get('prompt')}\n"
@@ -264,8 +298,6 @@ def topic_gate_check(candidate: dict, digest: list[dict]) -> tuple[bool, list[st
         reasons.append(f"door: {scores.get('door_notes') or 'not affirmed'}")
     if scores.get("plausibility_ok") is not True:
         reasons.append(f"plausibility: {scores.get('plausibility_notes') or 'not affirmed'}")
-    if scores.get("novelty_ok") is not True:
-        reasons.append(f"novelty: {scores.get('novelty_notes') or 'not affirmed'}")
 
     # Schema completeness -- mechanical, not the gate model's job to judge.
     required = ("id", "category", "prompt", "universal_door", "hook_seed", "dinner_table_line", "emotion", "image_type")
@@ -438,6 +470,8 @@ def get_dynamic_topic(recent_history: list[dict]) -> dict | None:
     like any other validation failure in this pipeline."""
     digest = build_recent_topics_digest()
     full_history = build_full_history()
+    target_category = choose_target_category(recent_history)
+    saturated = overused_subjects(full_history)
     # .get(), not recent_history[0]["category"] -- the most recent record can
     # be a well-formed-but-sparse skip (e.g. "topic generation exhausted",
     # which has no topic/category at all) and this line ran on every single
@@ -461,8 +495,8 @@ def get_dynamic_topic(recent_history: list[dict]) -> dict | None:
             )
 
         try:
-            candidate = generate_candidate(digest, last_category, retry_hint)
-            passed, reasons, scores = topic_gate_check(candidate, digest)
+            candidate = generate_candidate(digest, last_category, retry_hint, target_category, saturated)
+            passed, reasons, scores = topic_gate_check(candidate)
         except Exception as e:
             logger.warning("Topic generation attempt %d/%d errored: %s", attempt, MAX_TOPIC_ATTEMPTS, e)
             continue
