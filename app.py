@@ -20,7 +20,6 @@ import generate
 import idiom_generate
 import idiom_prompt
 import idiom_research
-import idiom_topics
 import images
 import poster
 import state
@@ -34,11 +33,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("concept-bot")
 
 app = Flask(__name__)
-
-_idiom_bank_issues = idiom_topics.validate_idiom_bank()
-if _idiom_bank_issues:
-    logger.error("IDIOM_BANK_INVALID: %s", json.dumps(_idiom_bank_issues))
-    raise RuntimeError(f"idiom_topics.py failed validate_idiom_bank(): {_idiom_bank_issues}")
 
 
 def _opening_line(draft: str) -> str:
@@ -161,7 +155,7 @@ def run_pipeline(dry_run: bool) -> dict:
     return {"status": "skipped", "topic": topic["id"], "reasons": failure_reasons}
 
 
-def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
+def run_idiom_pipeline(dry_run: bool) -> dict:
     """Idiom-format counterpart of run_pipeline. Parallel by design — the
     five-beat path above is untouched.
 
@@ -181,22 +175,24 @@ def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
             )
             return {"status": "skipped_duplicate_guard", "minutes_since_last_post": round(minutes_since, 1)}
 
-    queue = state.queue_all()
-    if idiom_id:
-        topic = idiom_generate.find_idiom(idiom_id, queue)
-        if topic is None:
-            return {"status": "error", "reason": f"unknown idiom_id {idiom_id!r}"}
-    else:
-        topic = idiom_generate.pick_next_idiom(state.get_idiom_history(), queue)
-        if topic is None:
-            # Nothing unposted is left and the researched queue is empty.
-            # Skip rather than repeat (same rule as everyday topics); this
-            # goes through the POST_SKIPPED alert path so it is never silent.
-            logger.error("POST_SKIPPED: %s", json.dumps({"format": "idiom", "reason": "no unposted idiom available; research queue empty"}))
-            if not dry_run:
-                state.record_post({"category": "idiom", "format": "idiom", "status": "skipped",
-                                   "reasons": ["no unposted idiom available"]})
-            return {"status": "skipped", "format": "idiom", "reasons": ["no unposted idiom available"]}
+    # No bank, no queue: the AI proposes a fresh idiom and it is researched and
+    # independently verified right now, checked against EVERY idiom ever
+    # attempted (idiom_phrase on post_history). Every phrase it tries and
+    # drops is recorded, so it is never proposed again.
+    topic, rejects = idiom_research.find_new_idiom(state.get_idiom_history())
+    if not dry_run:
+        for r in rejects:
+            state.record_post({"category": "idiom", "format": "idiom", "status": "rejected_research",
+                               "idiom_phrase": r["idiom"], "reasons": [r["reason"]]})
+    if topic is None:
+        # Nothing survived research. Skip rather than substitute -- same rule
+        # as everyday topics, through the POST_SKIPPED alert path.
+        reasons = [r["reason"] for r in rejects] or ["no idiom could be proposed"]
+        logger.error("POST_SKIPPED: %s", json.dumps({"format": "idiom", "reasons": reasons}))
+        if not dry_run:
+            state.record_post({"category": "idiom", "format": "idiom", "status": "skipped",
+                               "reasons": ["no idiom survived research"]})
+        return {"status": "skipped", "format": "idiom", "reasons": reasons}
 
     failure_reasons: list[str] = []
     retry_hint = ""
@@ -256,7 +252,10 @@ def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
                 # Phrase + provenance are stored on the record itself so the
                 # duplicate gate for researched idioms never depends on a file.
                 "idiom_phrase": topic["idiom"],
-                "idiom_source": topic.get("source_kind", "bank"),
+                "idiom_source": "researched",
+                "idiom_confidence": topic["confidence"],
+                "idiom_origin": topic["verified_origin"],
+                "idiom_sources": topic.get("sources", []),
             }
         )
         logger.info("Posted idiom tweet %s for '%s'", tweet_id, topic["id"])
@@ -276,18 +275,10 @@ def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
                 "status": "skipped",
                 "reasons": failure_reasons,
                 "idiom_phrase": topic["idiom"],
-                "idiom_source": topic.get("source_kind", "bank"),
+                "idiom_source": "researched",
             }
         )
     return {"status": "skipped", "format": "idiom", "topic": topic["id"], "reasons": failure_reasons}
-
-
-@app.route("/refill_idioms", methods=["GET", "POST"])
-def refill_idioms_endpoint():
-    """Researches new idioms into the queue (see idiom_research.py). Cheap
-    no-op when the queue is already at target depth, so it is safe to run
-    on a frequent schedule."""
-    return jsonify(idiom_research.refill_queue()), 200
 
 
 @app.route("/post", methods=["GET", "POST"])
@@ -295,7 +286,7 @@ def post_endpoint():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
     fmt = request.args.get("format", "everyday")
     if fmt == "idiom":
-        result = run_idiom_pipeline(dry_run, idiom_id=request.args.get("idiom_id"))
+        result = run_idiom_pipeline(dry_run)
     else:
         result = run_pipeline(dry_run)
     return jsonify(result), 200

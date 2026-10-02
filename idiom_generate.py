@@ -1,5 +1,5 @@
 """
-Idiom-format pipeline pieces: generation, validation, selection, image.
+Idiom-format pipeline pieces: generation, validation, image.
 
 Parallel to generate.py + validate.py for the five-beat everyday-mystery
 format — deliberately a separate module so the existing pipeline stays
@@ -10,7 +10,6 @@ gift_checks, parse_critic_response) are imported rather than duplicated.
 from __future__ import annotations
 
 import json
-import random
 import re
 
 import anthropic
@@ -18,62 +17,11 @@ import anthropic
 import config
 import idiom_images
 import idiom_prompt
-import idiom_research
-import idiom_topics
-from idiom_topics import IDIOM_TOPICS
 from llm_utils import extract_text
 from validate import gift_checks, rule_based_checks
 from validate_prompt import parse_critic_response
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3)
-
-
-def find_idiom(idiom_id: str, queue: list[dict]) -> dict | None:
-    """Look an idiom up by id in the hand-researched bank, then the queue."""
-    return idiom_topics.get_idiom(idiom_id) or next((q for q in queue if q.get("id") == idiom_id), None)
-
-
-def pick_next_idiom(idiom_history: list[dict], queue: list[dict], exclude_ids: set = frozenset()) -> dict | None:
-    """
-    Pick the next idiom to post. NEVER returns an idiom that has already
-    been posted -- when nothing unposted is left, returns None and the caller
-    skips the slot (same rule as everyday topics: skip, don't repeat).
-
-    The previous version recycled the least-recently-posted idiom once the
-    30-entry bank was exhausted. At 2 posts/day that happened on 2026-09-28,
-    and white elephant, steal thunder, rule of thumb and saved by the bell
-    all posted a second time. A finite bank plus a repeat-on-exhaustion
-    fallback quietly broke the "100% no repeated post" rule.
-
-    Order of preference:
-      1. hand-researched bank idioms never posted (verified, scenes written
-         by hand) -- includes ones that failed the draft gate once
-      2. the oldest idiom in the researched queue (see idiom_research.py)
-
-    An idiom whose draft has failed the quality gate MAX_ATTEMPTS_PER_IDIOM
-    times is given up on, not retried forever. `idiom_history` is the FULL
-    idiom record from state.get_idiom_history() -- a windowed view would
-    quietly forget old idioms.
-    """
-    posted = {h.get("topic_id") for h in idiom_history if h.get("status") == "posted"}
-    skips: dict[str, int] = {}
-    for h in idiom_history:
-        if h.get("status") == "skipped" and h.get("topic_id"):
-            skips[h["topic_id"]] = skips.get(h["topic_id"], 0) + 1
-
-    def usable(topic_id: str) -> bool:
-        return (
-            topic_id not in posted
-            and topic_id not in exclude_ids
-            and skips.get(topic_id, 0) < idiom_research.MAX_ATTEMPTS_PER_IDIOM
-        )
-
-    from_bank = [t for t in IDIOM_TOPICS if usable(t["id"])]
-    if from_bank:
-        return random.choice(from_bank)
-
-    ready = [q for q in queue if q.get("status") == "ready" and usable(q["id"])]
-    return ready[0] if ready else None  # queue is oldest-first
 
 
 # X has no native italics; the convention is Unicode Mathematical Sans-Serif
@@ -187,7 +135,7 @@ def validate_idiom_draft(draft: str, topic: dict) -> tuple[bool, list[str], dict
 
 def source_idiom_image(topic: dict) -> str:
     """Generate the engraving-style illustration for this idiom, then verify
-    it actually depicts the bank's scene (a cheap Haiku vision check — Gemini
+    it actually depicts the intended scene (a cheap Haiku vision check — Gemini
     occasionally drifts off-prompt, and an off-topic image under a history
     post costs credibility). One regeneration attempt if the first image
     fails relevance; after that, raise. Raises idiom_images.IdiomImageError

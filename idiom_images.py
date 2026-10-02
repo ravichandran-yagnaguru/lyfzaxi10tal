@@ -55,7 +55,7 @@ _MODEL = "gemini-2.5-flash-image"
 _ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_MODEL}:generateContent"
 
 # Locked style fragment. Every idiom image prompt is built by wrapping
-# idiom_topics.py's `image_style` scene description in this exact template.
+# the researched entry's `image_style` scene description in this exact template.
 # Changing this changes the look of every future idiom image at once --
 # keep the whole series visually consistent rather than editing per-post.
 _STYLE_TEMPLATE = (
@@ -72,7 +72,7 @@ class IdiomImageError(Exception):
 def build_prompt(era: str, scene: str) -> str:
     """
     era: e.g. "18th", "19th", "15th"
-    scene: idiom_topics.py's `image_style` field for this idiom
+    scene: the researched entry's `image_style` field for this idiom
     """
     return _STYLE_TEMPLATE.format(era=era, scene=scene)
 
@@ -131,14 +131,14 @@ def generate_idiom_image(idiom_id: str, era: str, scene: str) -> str:
 
 
 def generate_for_topic(topic: dict, era: str | None = None) -> str:
-    """Convenience wrapper taking an idiom_topics.py entry directly. Era
-    comes from the bank entry's `era` field (override via the parameter)."""
+    """Convenience wrapper taking a researched idiom entry directly. Era
+    comes from the entry's `era` field (override via the parameter)."""
     return generate_idiom_image(topic["id"], era or topic.get("era", "19th"), topic["image_style"])
 
 
 def check_image_relevance(path: str, scene: str) -> tuple[bool, str]:
     """Cheap vision check: does the generated image actually depict the
-    bank's scene? Gemini occasionally drifts off-prompt, and an off-topic
+    intended scene? Gemini occasionally drifts off-prompt, and an off-topic
     image under a history post costs exactly the credibility this account
     runs on. Uses the Haiku critic model with the image inline (~a tenth of
     a cent per check). Returns (relevant, reason).
@@ -182,27 +182,3 @@ def check_image_relevance(path: str, scene: str) -> tuple[bool, str]:
     reason_match = re.search(r"REASON:\s*(.*)", text, re.IGNORECASE)
     reason = reason_match.group(1).strip() if reason_match else text[:200]
     return relevant, reason
-
-
-if __name__ == "__main__":
-    # Manual smoke test -- does NOT run automatically, requires a real key.
-    # Usage: python idiom_images.py
-    import sys
-
-    sys.path.insert(0, ".")
-    from idiom_topics import IDIOM_TOPICS
-
-    # Full-bank smoke tests cost one Gemini image per idiom -- pass ids to
-    # test specific entries, or --first-3 for a quick spot check.
-    ids = [a for a in sys.argv[1:] if not a.startswith("-")]
-    to_test = [t for t in IDIOM_TOPICS if not ids or t["id"] in ids]
-    if "--first-3" in sys.argv:
-        to_test = to_test[:3]
-
-    for topic in to_test:
-        try:
-            path = generate_for_topic(topic)
-            relevant, reason = check_image_relevance(path, topic["image_style"])
-            print(f"OK  {topic['id']} -> {path}  relevance={'PASS' if relevant else 'FAIL'} ({reason})")
-        except IdiomImageError as e:
-            print(f"FAIL {topic['id']}: {e}")

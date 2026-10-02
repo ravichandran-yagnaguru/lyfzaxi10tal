@@ -68,9 +68,9 @@ Return only the post text. No preamble, no title, no quotation marks around the 
 
 def build_idiom_user_turn(topic: dict) -> str:
     """
-    Build the generator's user turn from an idiom_topics.py entry.
+    Build the generator's user turn from a researched idiom entry (see idiom_research.py).
 
-    The bank's story/reveal/use fields are TARGET CONTENT, not text to copy —
+    The entry's story/reveal/use fields are TARGET CONTENT, not text to copy —
     the generator writes its own version hitting the same beats.
     verified_origin is the ground truth it must not contradict.
     """
@@ -145,7 +145,7 @@ Fail this gate if the draft:
 - (confidence: contested) states the unproven part as flat, established fact — the documented parts may be told straight, but the disputed link must be hedged
 - (confidence: folklore) presents the legend as documented history. For folklore idioms the popular story MAY be retold — that is the point — but only clearly framed as a story passed down ("the story people tell...", "proven never"), and the draft must not claim documentation that doesn't exist. A folklore draft that honestly labels the legend as legend PASSES this gate.
 
-The generator's story beat is drawn from the same bank entry as VERIFIED ORIGIN — vivid scene-setting consistent with the verified material (weather, posture, mood) is storytelling, not invention. Only fail on fabricated checkable specifics: names, dates, places, numbers, sources, or causal claims not in the material.
+The generator's story beat is drawn from the same researched entry as VERIFIED ORIGIN — vivid scene-setting consistent with the verified material (weather, posture, mood) is storytelling, not invention. Only fail on fabricated checkable specifics: names, dates, places, numbers, sources, or causal claims not in the material.
 
 This gate exists because popular idiom folklore is unreliable — verification of the pilot batch found 2 of 5 idioms needed correction against the popular version. Accuracy is the single most important check in this format. When in doubt about a checkable claim, fail it and say exactly which claim is the problem.
 

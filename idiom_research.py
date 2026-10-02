@@ -1,21 +1,24 @@
 """
-Researches NEW idioms so the idiom format never has to repeat one.
+Picks and verifies a NEW idiom, live, at every idiom slot. There is no bank.
 
 WHY THIS EXISTS
 ---------------
-idiom_topics.py is a hand-researched bank of 30. At 2 posts/day that is a
-15-day supply, and once it ran out (2026-09-28) the picker's "recycle the
-least recently posted" fallback began re-posting idioms (white elephant,
-steal thunder, rule of thumb, saved by the bell). That fallback contradicted
-the standing "100% no repeated post" rule, and nobody flagged it when it was
-built. There is no way to hand-research an unbounded supply, so new idioms
-are researched automatically -- but idiom accuracy is this format's whole
-credibility bet (the pilot found 2 of 5 popular origins needed correction),
-so research is held to a stricter standard than anything else here:
+The idiom format used to draw from a hand-researched list of 30. At 2 posts a
+day that ran out in 15 days, and a "recycle the least recently posted"
+fallback then began re-posting idioms (white elephant, steal thunder, rule of
+thumb, saved by the bell) -- breaking the standing "100% no repeated post"
+rule. A static list, however carefully written, is finite; the point of using
+AI here is an unbounded supply of unique topics. So the list is gone, and a
+pre-filled queue (which is just a bank with extra steps) is gone too: each
+slot asks the AI for a fresh idiom and verifies it right then.
 
-  1. propose_idiom()  -- Claude proposes ONE famous idiom, shown everything
-                         already covered so it can't re-propose.
-  2. research_idiom() -- Claude WITH WEB SEARCH builds a full bank entry:
+Idiom accuracy is this format's whole credibility bet (an early pilot found 2
+of 5 popular origin stories needed correcting), so a fresh idiom is held to a
+stricter standard than anything else here:
+
+  1. propose_idiom()  -- Claude proposes ONE famous idiom, shown every idiom
+                         already covered so it cannot re-propose.
+  2. research_idiom() -- Claude WITH WEB SEARCH builds a full entry: the
                          documented origin, the popular myth if any, and an
                          honest confidence tier (solid / contested / folklore).
   3. audit_idiom()    -- a SECOND, independent Claude+web-search pass that
@@ -23,14 +26,13 @@ so research is held to a stricter standard than anything else here:
                          and re-verifies it from scratch. Disagreement on the
                          facts rejects the entry; disagreement on the tier
                          resolves to the MORE conservative one.
-  4. structural checks + a code-level duplicate gate.
+  4. structural checks + a code-level duplicate gate, independent of any
+     model's say-so.
 
-Entries that pass are stored in Firestore's `idiom_queue` collection (status
-"ready"); the posting path only ever reads from there, so slow, costly
-research never sits on the critical path of a scheduled post. Rejected
-candidates are stored too (status "rejected") so they are never re-proposed.
-The existing draft generator/critic then treat a queue entry exactly like a
-hand-written bank entry.
+"Covered" means every idiom ever attempted, in any state (posted, failed the
+draft gate, or rejected by research), read from the idiom_phrase field on
+Firestore's post_history records -- never from a file. Nothing is ever
+retried: a failed idiom is simply never proposed again.
 """
 
 from __future__ import annotations
@@ -44,8 +46,6 @@ from datetime import datetime, timezone
 import anthropic
 
 import config
-import idiom_topics
-import state
 from llm_utils import extract_text
 
 logger = logging.getLogger("concept-bot")
@@ -60,15 +60,13 @@ _WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_us
 VALID_TIERS = ("solid", "contested", "folklore")
 _TIER_RANK = {"solid": 0, "contested": 1, "folklore": 2}  # higher = more conservative
 
-# Queue depth the refill job tries to maintain, and how many idioms a single
-# refill request may research (each takes roughly 1-2 minutes).
-TARGET_QUEUE_DEPTH = 8
-MAX_NEW_PER_REFILL = 3
-MAX_PROPOSALS_PER_NEW_IDIOM = 4
-
-# An idiom whose draft fails the quality gate this many times is given up on
-# rather than retried forever.
-MAX_ATTEMPTS_PER_IDIOM = 2
+# Bounds on one slot's research phase. Proposals are cheap (~2s) and mostly
+# catch duplicates; research+audit is the expensive part (~26s). The whole
+# request must finish inside Cloud Run's 300s limit, and the draft, critic and
+# image steps that follow need roughly 100-150s of it.
+MAX_PROPOSALS = 6
+MAX_RESEARCH_ATTEMPTS = 3
+RESEARCH_TIME_BUDGET_S = 110.0
 
 
 # --------------------------------------------------------------------------
@@ -120,18 +118,17 @@ def is_duplicate(phrase: str, covered_phrases: list[str]) -> str | None:
     return None
 
 
-def covered_phrases() -> list[str]:
-    """Every idiom ever banked, queued (any status), or posted."""
-    phrases = [t["idiom"] for t in idiom_topics.IDIOM_TOPICS]
-    phrases += [q["idiom"] for q in state.queue_all() if q.get("idiom")]
-    phrases += [h["idiom_phrase"] for h in state.get_idiom_history() if h.get("idiom_phrase")]
+def covered_phrases(idiom_history: list[dict]) -> list[str]:
+    """Every idiom ever attempted, in any state, from the idiom_phrase field
+    on post_history records."""
     seen: set[str] = set()
-    unique = []
-    for p in phrases:
-        if p.lower() not in seen:
+    phrases = []
+    for h in idiom_history:
+        p = h.get("idiom_phrase")
+        if p and p.lower() not in seen:
             seen.add(p.lower())
-            unique.append(p)
-    return unique
+            phrases.append(p)
+    return phrases
 
 
 # --------------------------------------------------------------------------
@@ -309,88 +306,53 @@ def research_and_vet(idiom: str) -> tuple[dict | None, str]:
 
 
 # --------------------------------------------------------------------------
-# Queue refill
+# The one entry point
 # --------------------------------------------------------------------------
 
-def available_in_queue(queue: list[dict], idiom_history: list[dict]) -> list[dict]:
-    """Queue entries that are ready and not yet posted or given up on."""
-    posted = {h.get("topic_id") for h in idiom_history if h.get("status") == "posted"}
-    skips: dict[str, int] = {}
-    for h in idiom_history:
-        if h.get("status") == "skipped" and h.get("topic_id"):
-            skips[h["topic_id"]] = skips.get(h["topic_id"], 0) + 1
-    return [
-        q for q in queue
-        if q.get("status") == "ready" and q["id"] not in posted and skips.get(q["id"], 0) < MAX_ATTEMPTS_PER_IDIOM
-    ]
-
-
-
-def refill_queue(target_depth: int = TARGET_QUEUE_DEPTH, max_new: int = MAX_NEW_PER_REFILL, time_budget_s: float = 200.0) -> dict:
-    """Researches new idioms until the ready queue reaches target_depth, up to
-    max_new accepted entries, within a wall-clock budget. Returns a summary."""
+def find_new_idiom(idiom_history: list[dict]) -> tuple[dict | None, list[dict]]:
+    """Proposes, researches and vets a brand-new idiom. Returns
+    (entry, rejects): `entry` is a vetted idiom dict ready for the draft
+    pipeline (or None if nothing survived within the bounds), `rejects` lists
+    every phrase tried and dropped, with the reason, so the caller can record
+    them -- recorded phrases count as covered, so they are never proposed
+    again."""
     started = time.monotonic()
-    queue = state.queue_all()
-    history = state.get_idiom_history()
-    depth = len(available_in_queue(queue, history))
-    summary = {"depth_before": depth, "accepted": [], "rejected": []}
+    covered = covered_phrases(idiom_history)
+    tried: list[str] = []
+    rejects: list[dict] = []
+    research_attempts = 0
 
-    if depth >= target_depth:
-        summary["note"] = "queue already at target depth; nothing to do"
-        summary["depth_after"] = depth
-        return summary
-
-    covered = covered_phrases()
-    rejected_this_run: list[str] = []
-
-    while len(summary["accepted"]) < max_new and depth + len(summary["accepted"]) < target_depth:
-        accepted_one = False
-        for _ in range(MAX_PROPOSALS_PER_NEW_IDIOM):
-            if time.monotonic() - started > time_budget_s:
-                summary["note"] = "time budget reached"
-                summary["depth_after"] = depth + len(summary["accepted"])
-                return summary
-
-            try:
-                phrase = propose_idiom(covered, rejected_this_run)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Idiom proposal failed: %s", e)
-                continue
-
-            duplicate_of = is_duplicate(phrase, covered)
-            if duplicate_of:
-                logger.info("Proposed '%s' duplicates '%s'; re-proposing", phrase, duplicate_of)
-                rejected_this_run.append(phrase)
-                continue
-
-            try:
-                entry, reason = research_and_vet(phrase)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Research of '%s' errored: %s", phrase, e)
-                rejected_this_run.append(phrase)
-                continue
-
-            covered.append(phrase)
-            if entry is None:
-                logger.info("Idiom '%s' rejected: %s", phrase, reason)
-                rejected_this_run.append(phrase)
-                state.queue_put({"id": _slug(phrase), "idiom": phrase, "status": "rejected", "reject_reason": reason})
-                summary["rejected"].append({"idiom": phrase, "reason": reason})
-                continue
-
-            entry["id"] = _slug(entry["idiom"])
-            entry["status"] = "ready"
-            entry["source_kind"] = "researched"
-            state.queue_put(entry)
-            logger.info("Idiom '%s' accepted into queue (%s)", entry["idiom"], entry["confidence"])
-            summary["accepted"].append({"idiom": entry["idiom"], "confidence": entry["confidence"]})
-            covered.append(entry["idiom"])
-            accepted_one = True
+    for _ in range(MAX_PROPOSALS):
+        if research_attempts >= MAX_RESEARCH_ATTEMPTS or time.monotonic() - started > RESEARCH_TIME_BUDGET_S:
             break
 
-        if not accepted_one:
-            summary["note"] = "no proposal survived vetting this run"
-            break
+        try:
+            phrase = propose_idiom(covered, tried)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Idiom proposal failed: %s", e)
+            continue
 
-    summary["depth_after"] = depth + len(summary["accepted"])
-    return summary
+        duplicate_of = is_duplicate(phrase, covered + tried)
+        if duplicate_of:
+            logger.info("Proposed '%s' duplicates '%s'; re-proposing", phrase, duplicate_of)
+            tried.append(phrase)
+            continue
+
+        research_attempts += 1
+        try:
+            entry, reason = research_and_vet(phrase)
+        except Exception as e:  # noqa: BLE001
+            entry, reason = None, f"research errored: {e}"
+
+        tried.append(phrase)
+        if entry is None:
+            logger.info("Idiom '%s' rejected: %s", phrase, reason)
+            rejects.append({"idiom": phrase, "reason": reason})
+            continue
+
+        entry["id"] = _slug(entry["idiom"])
+        entry["source_kind"] = "researched"
+        logger.info("New idiom accepted: '%s' (%s)", entry["idiom"], entry["confidence"])
+        return entry, rejects
+
+    return None, rejects
