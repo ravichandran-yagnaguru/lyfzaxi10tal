@@ -19,6 +19,7 @@ import config
 import generate
 import idiom_generate
 import idiom_prompt
+import idiom_research
 import idiom_topics
 import images
 import poster
@@ -180,14 +181,22 @@ def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
             )
             return {"status": "skipped_duplicate_guard", "minutes_since_last_post": round(minutes_since, 1)}
 
+    queue = state.queue_all()
     if idiom_id:
-        topic = idiom_topics.get_idiom(idiom_id)
+        topic = idiom_generate.find_idiom(idiom_id, queue)
         if topic is None:
             return {"status": "error", "reason": f"unknown idiom_id {idiom_id!r}"}
     else:
-        topic = idiom_generate.pick_next_idiom(recent)
+        topic = idiom_generate.pick_next_idiom(state.get_idiom_history(), queue)
         if topic is None:
-            return {"status": "error", "reason": "no eligible idiom in the bank"}
+            # Nothing unposted is left and the researched queue is empty.
+            # Skip rather than repeat (same rule as everyday topics); this
+            # goes through the POST_SKIPPED alert path so it is never silent.
+            logger.error("POST_SKIPPED: %s", json.dumps({"format": "idiom", "reason": "no unposted idiom available; research queue empty"}))
+            if not dry_run:
+                state.record_post({"category": "idiom", "format": "idiom", "status": "skipped",
+                                   "reasons": ["no unposted idiom available"]})
+            return {"status": "skipped", "format": "idiom", "reasons": ["no unposted idiom available"]}
 
     failure_reasons: list[str] = []
     retry_hint = ""
@@ -244,6 +253,10 @@ def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
                 "image_source": "gemini-illustration" if image_path else "none",
                 "attribution": "",
                 "opening_line": opening_line,
+                # Phrase + provenance are stored on the record itself so the
+                # duplicate gate for researched idioms never depends on a file.
+                "idiom_phrase": topic["idiom"],
+                "idiom_source": topic.get("source_kind", "bank"),
             }
         )
         logger.info("Posted idiom tweet %s for '%s'", tweet_id, topic["id"])
@@ -262,9 +275,19 @@ def run_idiom_pipeline(dry_run: bool, idiom_id: str | None = None) -> dict:
                 "format": "idiom",
                 "status": "skipped",
                 "reasons": failure_reasons,
+                "idiom_phrase": topic["idiom"],
+                "idiom_source": topic.get("source_kind", "bank"),
             }
         )
     return {"status": "skipped", "format": "idiom", "topic": topic["id"], "reasons": failure_reasons}
+
+
+@app.route("/refill_idioms", methods=["GET", "POST"])
+def refill_idioms_endpoint():
+    """Researches new idioms into the queue (see idiom_research.py). Cheap
+    no-op when the queue is already at target depth, so it is safe to run
+    on a frequent schedule."""
+    return jsonify(idiom_research.refill_queue()), 200
 
 
 @app.route("/post", methods=["GET", "POST"])

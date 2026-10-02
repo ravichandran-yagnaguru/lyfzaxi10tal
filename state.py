@@ -118,3 +118,65 @@ def record_draft(
     entries = _load_local(_LOCAL_DRAFTS_FILE)
     entries.append(entry)
     _save_local(_LOCAL_DRAFTS_FILE, entries)
+
+
+# --------------------------------------------------------------------------
+# Idiom support: full idiom history + a queue of researched idioms
+# --------------------------------------------------------------------------
+# get_recent_history() is a fixed-size window over ALL formats; idiom
+# selection needs the complete idiom record (a finite window quietly forgets
+# old idioms, which is how repeats creep in), so it reads idiom records
+# directly.
+
+_LOCAL_QUEUE_FILE = "local_idiom_queue.json"
+_QUEUE_COLLECTION = "idiom_queue"
+
+
+def get_idiom_history() -> list[dict]:
+    """Every idiom-format post_history record (posted and skipped), most
+    recent first. No size cap -- the idiom record is small and selection
+    correctness depends on seeing all of it."""
+    if _use_firestore():
+        from google.cloud import firestore
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        db = firestore.Client(project=config.FIRESTORE_PROJECT_ID)
+        docs = db.collection(_COLLECTION).where(filter=FieldFilter("format", "==", "idiom")).stream()
+        entries = [d.to_dict() for d in docs]
+    else:
+        entries = [e for e in _load_local(_LOCAL_STATE_FILE) if e.get("format") == "idiom"]
+    entries.sort(key=lambda e: e.get("date", ""), reverse=True)
+    return entries
+
+
+def queue_all() -> list[dict]:
+    """Every researched-idiom queue entry (any status), oldest first. Each
+    dict carries its own `id`."""
+    if _use_firestore():
+        from google.cloud import firestore
+
+        db = firestore.Client(project=config.FIRESTORE_PROJECT_ID)
+        entries = []
+        for d in db.collection(_QUEUE_COLLECTION).stream():
+            entry = d.to_dict()
+            entry["id"] = d.id
+            entries.append(entry)
+    else:
+        entries = _load_local(_LOCAL_QUEUE_FILE)
+    entries.sort(key=lambda e: e.get("researched_at", ""))
+    return entries
+
+
+def queue_put(entry: dict) -> None:
+    """Insert or overwrite one queue entry, keyed by entry["id"]."""
+    entry = {**entry, "researched_at": entry.get("researched_at") or datetime.now(timezone.utc).isoformat()}
+    if _use_firestore():
+        from google.cloud import firestore
+
+        db = firestore.Client(project=config.FIRESTORE_PROJECT_ID)
+        db.collection(_QUEUE_COLLECTION).document(entry["id"]).set(entry)
+        return
+
+    entries = [e for e in _load_local(_LOCAL_QUEUE_FILE) if e.get("id") != entry["id"]]
+    entries.append(entry)
+    _save_local(_LOCAL_QUEUE_FILE, entries)

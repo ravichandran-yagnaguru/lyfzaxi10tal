@@ -18,6 +18,8 @@ import anthropic
 import config
 import idiom_images
 import idiom_prompt
+import idiom_research
+import idiom_topics
 from idiom_topics import IDIOM_TOPICS
 from llm_utils import extract_text
 from validate import gift_checks, rule_based_checks
@@ -26,40 +28,52 @@ from validate_prompt import parse_critic_response
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3)
 
 
-def pick_next_idiom(recent_history: list[dict], exclude_ids: set = frozenset()) -> dict | None:
+def find_idiom(idiom_id: str, queue: list[dict]) -> dict | None:
+    """Look an idiom up by id in the hand-researched bank, then the queue."""
+    return idiom_topics.get_idiom(idiom_id) or next((q for q in queue if q.get("id") == idiom_id), None)
+
+
+def pick_next_idiom(idiom_history: list[dict], queue: list[dict], exclude_ids: set = frozenset()) -> dict | None:
     """
-    Pick the next idiom to post. recent_history is the same most-recent-first
-    post_history the everyday-mystery picker reads; idiom entries are the ones
-    whose topic_id is in the idiom bank (ids don't collide with topics.py).
+    Pick the next idiom to post. NEVER returns an idiom that has already
+    been posted -- when nothing unposted is left, returns None and the caller
+    skips the slot (same rule as everyday topics: skip, don't repeat).
 
-    All confidence tiers are eligible — folklore idioms post too, framed
-    honestly (see idiom_prompt). Picks randomly among never-posted idioms
-    (random, not bank order — the same deterministic-order lesson as
-    topics.pick_next_topic); once all have posted, returns the least
-    recently posted. Returns None only if every idiom is excluded.
+    The previous version recycled the least-recently-posted idiom once the
+    30-entry bank was exhausted. At 2 posts/day that happened on 2026-09-28,
+    and white elephant, steal thunder, rule of thumb and saved by the bell
+    all posted a second time. A finite bank plus a repeat-on-exhaustion
+    fallback quietly broke the "100% no repeated post" rule.
+
+    Order of preference:
+      1. hand-researched bank idioms never posted (verified, scenes written
+         by hand) -- includes ones that failed the draft gate once
+      2. the oldest idiom in the researched queue (see idiom_research.py)
+
+    An idiom whose draft has failed the quality gate MAX_ATTEMPTS_PER_IDIOM
+    times is given up on, not retried forever. `idiom_history` is the FULL
+    idiom record from state.get_idiom_history() -- a windowed view would
+    quietly forget old idioms.
     """
-    eligible = [t for t in IDIOM_TOPICS if t["id"] not in exclude_ids]
-    if not eligible:
-        return None
+    posted = {h.get("topic_id") for h in idiom_history if h.get("status") == "posted"}
+    skips: dict[str, int] = {}
+    for h in idiom_history:
+        if h.get("status") == "skipped" and h.get("topic_id"):
+            skips[h["topic_id"]] = skips.get(h["topic_id"], 0) + 1
 
-    # .get(), not h["topic_id"] -- post_history is shared with the everyday
-    # pipeline, and a well-formed-but-sparse record there (e.g. a skipped
-    # slot with no topic at all) must never crash idiom selection. A 500
-    # here on 2026-09-11 poisoned every invocation of BOTH pipelines for the
-    # next 5 days, since this ran on every single request regardless of
-    # format -- see app.py's matching fix for the everyday-side equivalent.
-    posted_order = [h.get("topic_id") for h in recent_history]  # most-recent-first
+    def usable(topic_id: str) -> bool:
+        return (
+            topic_id not in posted
+            and topic_id not in exclude_ids
+            and skips.get(topic_id, 0) < idiom_research.MAX_ATTEMPTS_PER_IDIOM
+        )
 
-    def last_used_index(topic: dict) -> int:
-        try:
-            return posted_order.index(topic["id"])
-        except ValueError:
-            return -1  # never used
+    from_bank = [t for t in IDIOM_TOPICS if usable(t["id"])]
+    if from_bank:
+        return random.choice(from_bank)
 
-    never_used = [t for t in eligible if last_used_index(t) == -1]
-    if never_used:
-        return random.choice(never_used)
-    return max(eligible, key=last_used_index)
+    ready = [q for q in queue if q.get("status") == "ready" and usable(q["id"])]
+    return ready[0] if ready else None  # queue is oldest-first
 
 
 # X has no native italics; the convention is Unicode Mathematical Sans-Serif
